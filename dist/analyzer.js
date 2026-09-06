@@ -18063,6 +18063,9 @@ async function renderArchivePanel(container) {
       <button id="archiveBackfillBtn" class="btn btn-sm" style="background:var(--surface2);color:var(--text);padding:4px 12px;border-radius:6px;border:none;cursor:pointer;font-size:12px">
         ↻ Force Backfill
       </button>
+      <button id="archiveRepairBtn" class="btn btn-sm" title="Recompute every archived result from the local UFCStats cache. Force Backfill only fills rows whose result is MISSING; this one re-derives results that are PRESENT BUT WRONG — which is what the settle parser produced for every decision before 2026-09-06, and what a card can no longer self-correct once the board moves past it. No network: the cached fight history is parsed by the analyzer's own fetcher, which has always read the method correctly." style="background:var(--surface2);color:var(--text);padding:4px 12px;border-radius:6px;border:none;cursor:pointer;font-size:12px">
+        ⟳ Repair from Cache
+      </button>
       <span style="font-size:11px;color:var(--text-muted)">${allRows.length} total records · ${statusLine} <span style="color:var(--text-muted)">${stalenessLabel}</span></span>
     </div>
     ${predictionsHtml}
@@ -18149,6 +18152,32 @@ async function renderArchivePanel(container) {
         finally {
             btn.disabled = false;
             btn.textContent = '✕ DISMISS';
+        }
+    });
+    document.getElementById('archiveRepairBtn')?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = '⏳ Repairing...';
+        try {
+            const rowCount = async () => {
+                const raw = await storageGet(['prop_archive_v1']);
+                const rows = raw['prop_archive_v1'];
+                return Array.isArray(rows) ? rows.length : 0;
+            };
+            const before = await rowCount();
+            const res = await healArchiveFromCache();
+            const after = await rowCount();
+            // Row count is reported because this must only ever REWRITE results, never
+            // add or drop rows — a change here is the signal something went wrong.
+            showToast(`✓ Repaired from ${res.fighters} cached fighters (${res.skipped} skipped) · rows ${before} → ${after}`);
+            void renderArchivePanel(container);
+        }
+        catch (err) {
+            showToast(`Repair failed: ${err.message}`);
+        }
+        finally {
+            btn.disabled = false;
+            btn.textContent = '⟳ Repair from Cache';
         }
     });
     document.getElementById('archiveBackfillBtn')?.addEventListener('click', async (e) => {
@@ -26815,15 +26844,65 @@ async function healLastCompletedCard() {
 // and an UNDER as a miss whatever actually happened. Rounded to 2dp to match the
 // settle path exactly so the two can't differ by a rounding either.
 const ctrlMinsOf = (secs) => Math.round((Number(secs) / 60) * 100) / 100;
-async function archivePerformanceForRosterFighter(name, ufcData) {
+// ── REPAIR PASS: re-derive archived results from the local UFCStats cache ──
+// The settle parser in background.ts never read `method` (its regex predated
+// UFCStats wrapping the value in its own tag), so every DECISION was paid a
+// round-based FINISH bonus. Fixed 2026-09-06 — but only for settles from that
+// point on. Rows already written stayed wrong, and a card can only self-correct
+// while it is the current or last-completed one.
+//
+// Measured consequence, UFC 330: Islam Makhachev's archived Fantasy read 127.5
+// against a true 117.5 — a five-round decision paid `round4Plus 40` instead of
+// `decision 30`, +10 (and +10 on PrizePicks, 20 vs 10). His PLACED ledger, frozen
+// before the drift, held the correct 117.5. So "trust the archive" would have
+// corrupted a correct ledger entry: the archive is only authoritative once it has
+// been healed. See [[project_ufcstats_method_never_parsed]].
+//
+// This needs NO NETWORK. The cached fightHistory is parsed by the analyzer's own
+// fetcher, which has always read method correctly ("U-DEC"); only background's
+// settle parser was broken. So the cache is trustworthy ground truth and the
+// repair is a pure recomputation over ~370 cached fighters.
+//
+// It reuses archivePerformanceForRosterFighter rather than reimplementing the
+// scoring, because a second copy of the FP formula is exactly how this codebase
+// produced 2270 phantom findings once before.
+async function healArchiveFromCache() {
+    const all = await storageGet([]);
+    const keys = Object.keys(all).filter((k) => /^ufcstats_v51_/.test(k));
+    let fighters = 0, skipped = 0;
+    debugLog(`[repair] recomputing archived results from ${keys.length} cached fighters…`);
+    for (const k of keys) {
+        const rec = all[k];
+        if (!rec?.name || !Array.isArray(rec.fightHistory) || !rec.fightHistory.length) {
+            skipped++;
+            continue;
+        }
+        try {
+            await archivePerformanceForRosterFighter(rec.name, rec, { bypassRoster: true });
+            fighters++;
+        }
+        catch (e) {
+            skipped++;
+            debugLog(`[repair] ${rec.name}: ${e.message}`);
+        }
+    }
+    debugLog(`[repair] done — ${fighters} fighters recomputed, ${skipped} skipped`);
+    return { fighters, skipped };
+}
+async function archivePerformanceForRosterFighter(name, ufcData, opts) {
     if (!ufcData?.fightHistory?.length)
         return;
     const fighterNorm = normalizeName(name);
     if (!fighterNorm)
         return;
-    const roster = rosterNameSet();
-    if (!roster.has(fighterNorm.toLowerCase()))
-        return;
+    // The roster gate exists so a normal page load only archives the card in front
+    // of you. healArchiveFromCache() bypasses it deliberately: it is a repair pass
+    // over fighters who are on NO current card by definition.
+    if (!opts?.bypassRoster) {
+        const roster = rosterNameSet();
+        if (!roster.has(fighterNorm.toLowerCase()))
+            return;
+    }
     const records = [];
     for (const fight of ufcData.fightHistory) {
         const dateIso = toIsoDateOrNull(fight.date);
