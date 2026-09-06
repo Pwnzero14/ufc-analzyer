@@ -621,7 +621,39 @@ export const NAME_ALIASES: Record<string, string> = {
 //   wrong-signed line. Bumping to 44 keeps v43-anchored rows distinguishable in the
 //   archive — every diagnosis this session depended on knowing which model version
 //   produced a stored line.
-export const MODEL_VERSION = 44;
+// ── FP THIN-HISTORY SHRINKAGE (MODEL v45) ────────────────────────────────
+// MEASURED 2026-09-03 over 2019 fight pairs from the ufcstats caches: for each
+// fight, the mean of that fighter's PRIOR fights was scored against the actual
+// and compared against a control of simply assuming the league mean.
+//
+//   bucket   n     personal MAE   league MAE   meanDiff       t    significant
+//   n=1      255      39.8           36.5        -3.29     -1.50      no
+//   n=2      230      39.5           35.7        -3.77     -2.12      yes
+//   n=1-2    485                                 -3.52     -2.46      YES (pre-registered)
+//   n=3-5    537      34.9           34.3        -0.59     -0.71      no
+//   n=6-9    454      35.7           35.8        +0.16     +0.24      no
+//   n>=10    543      37.5           37.8        +0.34     +0.69      no
+//
+// Below 3 fights a fighter's own FP average is WORSE than assuming they are
+// league-average. n=1 alone is NOT individually significant; what passes is the
+// combined n=1-2 test, which was named BEFORE seeing the numbers. Crossover is
+// n~6, so this is a smooth shrink rather than a cliff at 3.
+//
+// K=3 in the repo's existing idiom (raw*n + MEAN*K)/(n + K), the same shape as
+// SS_RATE_SHRINK_K and R1_SS_SHRINK_K: most of the weight sits on the league
+// mean at n=1-2 and fades out by n~6.
+//
+// *** SHARED-SCORING SCALE ONLY. *** The probe computed FP with FANTASY_SCORING
+// (sig 0.4 / nonSig 0.2 / ctrl 0.03 / win bonuses 30-90), i.e. the Pick6 /
+// Underdog / Betr scale. PrizePicks scores on a different, lower scale and has
+// NO measured mean, so it is deliberately excluded — shrinking a PP average
+// toward a P6-scale mean would be worse than not shrinking at all.
+export const FP_SHRINK_K = 3;
+export const FP_LEAGUE_MEAN_SHARED = 69.4;
+
+// v45: FP thin-history shrinkage in the LEAN engine (the predictor already
+// shrinks separately — see [[project_fp_predictor_regression_to_mean]]).
+export const MODEL_VERSION = 45;
 
 // MODEL v37 · SS market anchor. See the v37 note above for the measurement.
 /** Strikes the raw SS projection runs above reality, removed before anchoring. */
