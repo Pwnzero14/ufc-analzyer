@@ -1,11 +1,130 @@
 ﻿# Resume Checkpoint
 
-Last Saved: 2026-09-05 20:40:00 -04:00
+Last Saved: 2026-09-06 17:00:00 -04:00
 Repository: C:\Users\abdir\Downloads\ufc_project_v2
 Branch: feature/sleek-theme-v1
-HEAD: 4f65cbb
+HEAD: 89418c3
 
 ## Last Notes
+################################################################################
+##  START HERE — 2026-09-06 SESSION CLOSE                                      ##
+################################################################################
+
+ONE ITEM LEFT ON THE QUEUE, and it is deliberately unresolved:
+
+  · THE -5 / -10 ARCHIVE TAIL. 24 rows at -5 and 6 at -10 where the stored value
+    sits BELOW a recomputation from the ufcstats cache, INCLUDING LOSSES — and on
+    a loss the win bonus is zero either way, so the gap must be a stat term
+    (5 = one takedown or reversal, 10 = a knockdown). ZERO grade flips, so
+    nothing is mis-graded because of it.
+    *** DO NOT CORRECT THESE ON THE THEORY. *** Verify a handful against the
+    UFCStats fight pages first. Three separate false positives this week came
+    from probes that re-implemented production's matching without production's
+    filters; a 30-row write on an unconfirmed mechanism is the same mistake with
+    a bigger blast radius.
+
+Everything else that was queued is done and verified — see below.
+
+################################################################################
+##  SHIPPED 2026-09-06                                                         ##
+################################################################################
+
+1. SETTLE HEAL ORPHAN WINDOW — CLOSED AND VERIFIED.
+   Verification: "Hernandez vs Rodrigues — 49 correct · 0 wrong". That event had
+   exactly ONE wrong row in the 09-05 sweep; the heal repaired it and nothing
+   else touched it. 26 fighters refetched on the one-shot pass, 0 stale, 0
+   missing.
+   Three fixes, and ALL THREE were needed:
+     a) `recentPast` filtered the UPCOMING events list. UFCStats drops an event
+        from that page the moment it completes, so at the instant of the flip —
+        the only instant that matters — the finished card was already gone and
+        setLastCompletedCard was UNREACHABLE. Now reads the COMPLETED page,
+        upcoming kept as fallback for the crossover window.
+     b) rosterNameSet() read only `allFighters` (the current board); now unions a
+        roster loaded from last_completed_ufc_card.
+     c) *** AND (b) ALONE WOULD HAVE CHANGED NOTHING. ***
+        archivePerformanceForRosterFighter only runs from fetchFighterStats,
+        which is only called for the CURRENT board — no past-card fighter would
+        ever have reached the gate to be let through. healLastCompletedCard()
+        (one-shot, marker-keyed per event, deferred 20s, sequential because
+        UFCStats carries a proof-of-work challenge) is what makes the other two
+        matter. Fixing the obvious gate and stopping would have LOOKED right and
+        done nothing.
+   This also reactivated the 09-04 cache-staleness fix, which was correct but
+   inert while (a) was wrong.
+
+2. JEAN SILVA — THE BOARD WAS SHOWING A DIFFERENT MAN.
+   UFCStats carries TWO: 9211aae062b799d6 "White Bear", 19-12-3, DOB 1977, ONE
+   fight on record (PRIDE Bushido 8, Jul 2005 vs Takanori Gomi); and
+   52ef95b5860fb28c "Lord", 17-3-0, DOB 1996, the featherweight on Noche UFC.
+   The board resolved to White Bear and rendered a complete, plausible card:
+   19-12-3, avg FP 4.8, SLpM 0.73, full head-to-head panels, no error anywhere.
+   Every projection for Silva vs Delgado was built on a 21-year-old PRIDE bout by
+   someone else. After the pin: 17-3-0, PROJ FP 89.4, SLpM 4.82.
+   NAME_ALIASES cannot fix this — the strings are identical. UFCSTATS_URL_OVERRIDES
+   is the instrument and already carried the same precedent ('mike davis').
+   *** A pin does NOT self-correct an existing cache. *** Expire the key
+   (fetchedAt = 0, do not delete — keeps a fallback) then reload.
+   Diagnostic for the next one: a fighter whose numbers look ABSURD rather than
+   merely wrong. Check RECORD + DOB against the card and whether the fight history
+   stops decades ago. `ufcstats_v51_<name>.detailUrl` names the ID actually used.
+
+3. MODEL v45 — FP THIN-HISTORY SHRINKAGE (lean engine).
+   (raw*n + 69.4*3)/(n + 3) applied to `baseFP` in calcLean.
+   VALIDATED, 2254 fight pairs / 370 fighters — shrunk beats or ties BOTH arms in
+   every bucket, nothing worse than personal anywhere (the over-shrink risk):
+       n=1    41.0 personal / 36.5 league / 35.9 SHRUNK   gain 5.11   t 3.23
+       n=1-2  40.1          / 36.0        / 35.8          gain 4.33   t 4.53
+       n>=10  37.0          / 37.3        / 36.9          gain 0.13   t 1.43
+   Three deliberate scope calls: applied to baseFP not avgFP (baseFP is what was
+   measured, and `mlAdjFP ?? avgFP` means shrinking only the average leaves the
+   other path unshrunk on exactly the thin fighters this is for); NOT applied to
+   PrizePicks (the probe used FANTASY_SCORING, so 69.4 is a P6/UD/Betr-scale mean
+   and PP scores lower — pulling a PP average toward it would be worse than
+   nothing); `avgFP` untouched so the displayed "avg N" stays a true observation.
+   CAVEAT: confirmation on a larger sample, NOT out-of-sample — K was chosen from
+   the measured crossover with the first measurement already in view.
+   STILL UNMEASURED: whether the final LEAN improves. This validates the INPUT
+   only. Grade v45 against v44 in the archive once events settle.
+
+4. NON-COMBINING LETTER FOLD — the other half of the 09-03 diacritic fix.
+   foldLetters() in config/index.ts, applied BEFORE the NFD strip at all FOUR
+   normalizers. NFD decomposes COMBINING MARKS only, so L-stroke, o-slash,
+   d-stroke, sharp-s, ae, oe, thorn etc. survived it untouched — and then degrade
+   to a SPACE once [^a-z] filters run, which is how "Klaudia Sygu(L-stroke)a"
+   became key "klaudia sygu a" (surname token "a") and a real fighter was filed
+   as a GHOST.
+   Measured: 41,564 archive rows, ZERO contain a foldable letter -> 0 new
+   recordKey collisions, 0 lossy. 375 distinct names across line stores + cache +
+   card -> 0 affected, 0 newly merged.
+   *** BE PRECISE: zero affected rows makes that a SAFETY result, not a
+   correctness one. *** There was no affected data left to validate against, so
+   correctness rests on synthetic tests against the REAL built normalizers
+   (6/6 and 8/8, incl. plain-ASCII and combining-mark regression cases).
+   AND: my FIRST collision probe measured the WRONG SURFACE. Archive rows are
+   written from UFCStats spellings, which are already plain ASCII; the exposure is
+   the MERGE path, where a book's spelling meets the board's. Measure where the
+   two spellings actually meet.
+
+5. DEAD CACHE PURGED. 190 keys (v49 x176, v50 x14), 0.65 MB, 10.85 -> 10.20 MB.
+   v51 370 -> 370 unchanged, 0 dead remaining. Only `ufcstats_v51_` is ever read
+   (analyzer.ts:1593); the one generic startsWith('ufcstats_') scan is the debug
+   Clear-cache button, which DELETES.
+   Correction worth keeping: the diagnosis probe first framed the 126 fighters
+   with a v49/v50 record but no v51 as "losing their only cached copy". THEY
+   WOULD REFETCH ANYWAY — nothing reads v49/v50, so those records were already
+   invisible to the app. Dead weight, not a fallback. That made the purge
+   zero-cost rather than a tradeoff.
+   NOTE: `unlimitedStorage` IS in the manifest, so the 10MB ceiling does not
+   apply and space was never the constraint. Do not re-derive a quota panic.
+
+################################################################################
+##  ARCHIVE ROW COUNT MOVES ON ITS OWN — do not read it as corruption          ##
+################################################################################
+41,528 -> 41,552 -> 41,564 -> 41,732 across this session. The heal writes rows
+when it reaches a card (the Hernandez backfill added ~168). A rising count is the
+system working.
+
 ################################################################################
 ##  SETTLE HEAL ORPHAN WINDOW — CLOSED AND VERIFIED 2026-09-06                 ##
 ################################################################################
