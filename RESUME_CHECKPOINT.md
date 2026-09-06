@@ -7,10 +7,47 @@ HEAD: 4f65cbb
 
 ## Last Notes
 ################################################################################
-##  *** DO THIS FIRST — user's explicit instruction, 2026-09-05 ***            ##
+##  SETTLE HEAL ORPHAN WINDOW — CLOSED AND VERIFIED 2026-09-06                 ##
 ################################################################################
-CLOSE THE SETTLE HEAL ORPHAN WINDOW. Two gates, both still open. Fix before the
-Noche UFC card (2026-09-12) settles, or it lands in the same trap Paris did.
+*** DONE. All three fixes are live and confirmed against real data. ***
+Verification: "Hernandez vs Rodrigues — 49 correct · 0 wrong". That event had
+exactly ONE wrong row in the 2026-09-05 history sweep; the heal repaired it and
+nothing else touched it. 26 fighters refetched on the one-shot pass, 0 still
+stale, 0 missing — so the STALE-BY-EVENT bypass fired AND the widened roster gate
+let the writes through.
+
+The chain, all three links needed together:
+    init +20s -> healLastCompletedCard()  (one-shot, marker-keyed per event)
+              -> loadCompletedCardRoster() populates _completedCardRoster
+              -> fetchFighterStats() for each past-card fighter
+              -> fetchFromUFCStats() TTL bypassed (fought since cached)
+              -> archivePerformanceForRosterFighter()
+              -> rosterNameSet() now unions the completed card -> heal WRITES
+
+WHAT WAS ACTUALLY WRONG (kept because the shape recurs):
+  1. `recentPast` filtered the UPCOMING events list, and UFCStats drops an event
+     from that page the moment it completes. So at the exact instant of the flip —
+     the only instant that matters — the finished card was already gone.
+     setLastCompletedCard was never a missing call; it was UNREACHABLE CODE at the
+     only time it mattered. Now reads the COMPLETED page, upcoming kept as
+     fallback for the crossover window.
+  2. rosterNameSet() read only `allFighters` (the current board).
+  3. *** AND WIDENING (2) ALONE WOULD HAVE CHANGED NOTHING. ***
+     archivePerformanceForRosterFighter only runs from fetchFighterStats, which is
+     only called for the CURRENT board — no past-card fighter would ever have
+     reached the gate to be let through. The one-shot backfill is what makes the
+     other two matter. Fixing the obvious gate and stopping there would have
+     looked right and done nothing.
+
+NOTE: last_completed_ufc_card still held the stale Aug 22 card at fix time, so the
+first pass healed THAT event rather than Paris. Harmless — Paris was already
+corrected by hand — and the record advances on the next card-fetch cycle.
+
+--- everything below this line is prior context ---
+
+################################################################################
+##  (SUPERSEDED) the two gates as they were described on 2026-09-05            ##
+################################################################################
 
   1. `last_completed_ufc_card` NEVER ADVANCES.
      `StorageService.setLastCompletedCard` exists (src/services/StorageService.ts
