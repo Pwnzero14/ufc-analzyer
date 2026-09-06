@@ -1225,6 +1225,16 @@ function storageGet<T = unknown>(keys: string[]): Promise<T> {
   return new Promise((resolve) => chrome.storage.local.get(keys, (data) => resolve(data as T)));
 }
 
+// chrome.storage.local.get([]) returns {} — an EMPTY ARRAY means "fetch these zero
+// keys", not "fetch everything". Only `null` means everything. Passing [] and then
+// filtering the result is a silent no-op that reports success: it is why the first
+// run of Repair from Cache announced "0 cached fighters" against 370 of them, and
+// why the debug Clear-cache button has never actually cleared anything.
+function storageGetAll<T = Record<string, unknown>>(): Promise<T> {
+  if (typeof chrome === 'undefined' || !chrome.storage) return Promise.resolve({} as T);
+  return new Promise((resolve) => chrome.storage.local.get(null, (data) => resolve(data as T)));
+}
+
 // A failed write used to be indistinguishable from a successful one: the callback
 // resolved without ever reading chrome.runtime.lastError, so `await storageSet(...)`
 // returned normally whether or not anything was stored.
@@ -27314,7 +27324,7 @@ const ctrlMinsOf = (secs: number | null | undefined): number =>
 // scoring, because a second copy of the FP formula is exactly how this codebase
 // produced 2270 phantom findings once before.
 async function healArchiveFromCache(): Promise<{ fighters: number; skipped: number }> {
-  const all = await storageGet<Record<string, UFCStatsData | undefined>>([]);
+  const all = await storageGetAll<Record<string, UFCStatsData | undefined>>();
   const keys = Object.keys(all).filter((k) => /^ufcstats_v51_/.test(k));
   let fighters = 0, skipped = 0;
   debugLog(`[repair] recomputing archived results from ${keys.length} cached fighters…`);
@@ -30118,7 +30128,7 @@ function scrollDebugPanelToBottom(panel: HTMLElement): void {
 document.getElementById('dbgTestBtn')?.addEventListener('click', async () => {
   const panel = setDebugPanelText('Reading stored card debug + live lines data...\n');
   if (!panel) return;
-  const all = await storageGet<Record<string, unknown>>([]);
+  const all = await storageGetAll<Record<string, unknown>>();
   for (const platform of ['pick6', 'underdog']) {
     const key = `lines_${platform}`;
     const lineData = all[key] as PlatformLinesPayload | undefined;
@@ -30183,7 +30193,7 @@ document.getElementById('dbgCopyBtn')?.addEventListener('click', () => {
 
 document.getElementById('dbgClearBtn')?.addEventListener('click', async () => {
   if (typeof chrome !== 'undefined' && chrome.storage) {
-    const all = await storageGet<Record<string, unknown>>([]);
+    const all = await storageGetAll<Record<string, unknown>>();
     const keys = Object.keys(all).filter(k => k.startsWith('ufcstats_'));
     keys.push('upcoming_ufc_card');
     await storageRemove(keys);
