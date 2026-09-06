@@ -162,7 +162,8 @@ export declare const NAME_ALIASES: Record<string, string>;
 export declare function foldLetters(s: string): string;
 export declare const FP_SHRINK_K = 3;
 export declare const FP_LEAGUE_MEAN_SHARED = 69.4;
-export declare const MODEL_VERSION = 45;
+export declare const FP_LEAGUE_MEAN_PP = 50.8;
+export declare const MODEL_VERSION = 46;
 /** Strikes the raw SS projection runs above reality, removed before anchoring. */
 export declare const SS_PROJECTION_BIAS = 6;
 /** Weight on the de-biased projection vs the posted line (0.5 = plain average). */
