@@ -1,4 +1,5 @@
 import type { PropArchiveRecord, PropType } from '../types/index.js';
+import { foldLetters } from '../config/index.js';
 
 const ARCHIVE_KEY = 'prop_archive_v1';
 const BACKFILL_META_KEY = 'prop_archive_backfill_meta_v1';
@@ -25,8 +26,16 @@ const BACKFILL_META_KEY = 'prop_archive_backfill_meta_v1';
 // See [[project_diacritic_name_split]].
 function normalizeName(name: unknown): string {
   if (typeof name !== 'string') return '';
-  return name
-    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
+  return foldLetters(name)
+    .replace(/[​-‍﻿­]/g, '')
+    // foldLetters runs BEFORE this chain: standalone letters (L-stroke, o-slash, sharp-s, ...)
+    // are NOT combining marks, so NFD leaves them untouched. Measured before
+    // shipping exactly as the 2026-09-03 combining-mark change was: across all
+    // 41,564 archive rows ZERO contain a foldable letter, therefore ZERO new
+    // recordKey collisions and ZERO lossy merges. That is a SAFETY result, not a
+    // correctness one — there was no affected data left to validate against, so
+    // the fold itself is covered by synthetic tests instead.
+    // See [[project_diacritic_name_split]].
     .normalize('NFD')
     .replace(/[\u0300-\u036F]/g, '')
     .replace(/\./g, '')

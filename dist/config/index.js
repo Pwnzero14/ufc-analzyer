@@ -635,6 +635,33 @@ export const NAME_ALIASES = {
 // Underdog / Betr scale. PrizePicks scores on a different, lower scale and has
 // NO measured mean, so it is deliberately excluded — shrinking a PP average
 // toward a P6-scale mean would be worse than not shrinking at all.
+// ── NON-COMBINING LETTER FOLD ────────────────────────────────────────────
+// `normalize('NFD').replace(/[̀-ͯ]/g,'')` removes COMBINING MARKS, so
+// it turns "é" into "e" and leaves these completely alone — they are standalone
+// letters that NFD does not decompose:
+//     L-stroke  o-slash  d-stroke  h-bar  t-bar  dotless-i  eth  schwa
+//     sharp-s   ae       oe        thorn
+//
+// Worse than not stripping: a normalizer that also filters [^a-z ] turns them
+// into a SPACE. "Klaudia Sygu(L-stroke)a" became the key "klaudia sygu a", whose
+// surname token is "a" — which is how a real fighter on a live card was filed as
+// a GHOST on 2026-09-05, the one bucket whose recommended action is deletion.
+//
+// The 2026-09-03 combining-mark fix was described at the time as "completing the
+// set". It closed half. See [[project_diacritic_name_split]].
+const LETTER_FOLD = {
+    'ł': 'l', 'Ł': 'L', 'ø': 'o', 'Ø': 'O', 'đ': 'd', 'Đ': 'D',
+    'ħ': 'h', 'Ħ': 'H', 'ŧ': 't', 'Ŧ': 'T', 'ı': 'i', 'ŀ': 'l', 'Ŀ': 'L',
+    'ð': 'd', 'Ð': 'D', 'ə': 'e', 'Ə': 'E',
+    'ß': 'ss', 'ẞ': 'SS', 'æ': 'ae', 'Æ': 'AE', 'œ': 'oe', 'Œ': 'OE',
+    'þ': 'th', 'Þ': 'TH',
+};
+const LETTER_FOLD_RE = new RegExp('[' + Object.keys(LETTER_FOLD).join('') + ']', 'g');
+/** Fold standalone letters NFD cannot decompose. Apply BEFORE the NFD strip so
+ *  a folded letter that also carries a combining mark is handled by both. */
+export function foldLetters(s) {
+    return s.replace(LETTER_FOLD_RE, (c) => LETTER_FOLD[c] ?? c);
+}
 export const FP_SHRINK_K = 3;
 export const FP_LEAGUE_MEAN_SHARED = 69.4;
 // v45: FP thin-history shrinkage in the LEAN engine (the predictor already
