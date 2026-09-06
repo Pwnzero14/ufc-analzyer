@@ -4558,17 +4558,19 @@ async function fetchUpcomingUFCCard(forceRefresh = false): Promise<UpcomingCardC
     pool.sort((a, b) => a.ts - b.ts);
     let nextEvent = pool[0];
 
-    // If the nearest event is still >7 days away, check the completed page for a card
-    // that is within ±3 days of today (UFCStats sometimes moves cards to completed early).
-    const sevenDays = 7 * 24 * 60 * 60 * 1000;
-    const threeDays = 3 * 24 * 60 * 60 * 1000;
-    if (!nextEvent || nextEvent.ts - now > sevenDays) {
+    // ── COMPLETED-PAGE EVENTS, fetched at most once per call ──────────────
+    // Two things below need this list, and before 2026-09-06 only one of them
+    // looked here — see the recentPast note further down for what that cost.
+    // Memoised so adding the second consumer does not add a second fetch.
+    type EvtRow = { name: string; date: string; url: string; ts: number };
+    let _completedEvents: EvtRow[] | null = null;
+    const loadCompletedEvents = async (): Promise<EvtRow[]> => {
+      if (_completedEvents) return _completedEvents;
+      _completedEvents = [];
       try {
         const compHtml = await ufcstatsFetchText(CONFIG.api.ufcstats.completed);
         if (compHtml) {
-          const compEvents: Array<{ name: string; date: string; url: string; ts: number }> = [];
-          const compRows = [...compHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
-          for (const rowM of compRows) {
+          for (const rowM of compHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
             const row = rowM[1];
             if (row.includes('<th')) continue;
             const linkM = row.match(/href="(http[^"]*event-details\/[a-f0-9]+)"/i);
@@ -4577,26 +4579,55 @@ async function fetchUpcomingUFCCard(forceRefresh = false): Promise<UpcomingCardC
             if (!linkM || !nameM || !dateM) continue;
             const ts = parseEventDateMs(dateM[0]);
             if (!Number.isFinite(ts)) continue;
-            compEvents.push({ name: nameM[1].trim(), date: dateM[0], url: linkM[1], ts });
-          }
-          // Look for an event close to today on the completed page
-          const closeEnough = compEvents
-            .filter((e) => Math.abs(e.ts - now) < threeDays)
-            .sort((a, b) => Math.abs(a.ts - now) - Math.abs(b.ts - now));
-          if (closeEnough.length) {
-            console.log(`[UFC Card] Upcoming page had no close event; using completed page: ${closeEnough[0].name}`);
-            nextEvent = closeEnough[0];
+            _completedEvents.push({ name: nameM[1].trim(), date: dateM[0], url: linkM[1], ts });
           }
         }
       } catch (e) {
-        console.warn('[UFC Card] Completed page fallback failed:', e);
+        console.warn('[UFC Card] completed page fetch failed:', e);
+      }
+      return _completedEvents;
+    };
+
+    // If the nearest event is still >7 days away, check the completed page for a card
+    // that is within ±3 days of today (UFCStats sometimes moves cards to completed early).
+    const sevenDays = 7 * 24 * 60 * 60 * 1000;
+    const threeDays = 3 * 24 * 60 * 60 * 1000;
+    if (!nextEvent || nextEvent.ts - now > sevenDays) {
+      // Look for an event close to today on the completed page
+      const closeEnough = (await loadCompletedEvents())
+        .filter((e) => Math.abs(e.ts - now) < threeDays)
+        .sort((a, b) => Math.abs(a.ts - now) - Math.abs(b.ts - now));
+      if (closeEnough.length) {
+        console.log(`[UFC Card] Upcoming page had no close event; using completed page: ${closeEnough[0].name}`);
+        nextEvent = closeEnough[0];
       }
     }
 
-    // Also cache the most recently completed event (within 14 days) for report card ordering
+    // ── Cache the most recently completed event. ──────────────────────────
+    // *** THIS USED TO FILTER `events`, WHICH IS THE UPCOMING LIST. *** UFCStats
+    // drops an event from the upcoming page once it is complete, so at exactly
+    // the moment of the flip — the only moment this matters — the card that just
+    // finished was already gone and `recentPast` was empty. setLastCompletedCard
+    // was therefore never reached, and the stored value froze: after the
+    // 2026-09-05 Paris card it still read "Hernandez vs. Rodrigues" from Aug 22,
+    // two events stale, while upcoming_ufc_card had moved on to Noche UFC.
+    //
+    // It only ever fired in the narrow window where UFCStats still lists a
+    // just-passed card as upcoming (the same quirk the 36h grace above exists
+    // for), which is why the field looked like it worked.
+    //
+    // Consequences of it being stale are not cosmetic: the post-event cache
+    // staleness check keys off these two records to decide a fighter has fought
+    // since their UFCStats copy was cached, and the settle heal path can be
+    // widened to trust it. Both are inert while this is wrong.
+    // See [[project_settle_heal_orphan_window]].
     const fourteenDays = 14 * 24 * 60 * 60 * 1000;
-    const recentPast = events
-      .filter((e) => e.ts < now && e.ts >= now - fourteenDays)
+    const pastFromUpcoming = events.filter((e) => e.ts < now && e.ts >= now - fourteenDays);
+    // Prefer the completed page; fall back to the upcoming list for the window
+    // where UFCStats has not moved the card across yet.
+    const pastFromCompleted = (await loadCompletedEvents())
+      .filter((e) => e.ts < now && e.ts >= now - fourteenDays);
+    const recentPast = (pastFromCompleted.length ? pastFromCompleted : pastFromUpcoming)
       .sort((a, b) => b.ts - a.ts);
     if (recentPast.length) {
       const lastEvent = recentPast[0];
