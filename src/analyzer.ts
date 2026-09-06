@@ -1328,6 +1328,56 @@ function debugLog(msg: string): void {
 // Extracted to ./analyzer/fantasy-scoring.ts.
 
 // ── BUILD FIGHTER DB ───────────────────────────────────────────────────────
+// ── SAME-NAME RESOLUTION DETECTOR ────────────────────────────────────────
+// UFCStats resolves a fighter by scanning the alpha page for the first row whose
+// First and Last cells match, so TWO REAL FIGHTERS SHARING A NAME are decided by
+// page order — often in favour of a retired one. NAME_ALIASES cannot help; the
+// strings are identical. UFCSTATS_URL_OVERRIDES pins the fix, but only once
+// somebody NOTICES.
+//
+// And noticing is the hard part, because the failure is completely silent. On
+// 2026-09-06 the board resolved "Jean Silva" to Jean "White Bear" Silva
+// (19-12-3, ONE fight on record: PRIDE Bushido 8, July 2005 vs Takanori Gomi)
+// instead of Jean "Lord" Silva (17-3-0), the featherweight actually on the card.
+// Nothing errored. The card rendered in full — avg FP 4.8, SLpM 0.73, complete
+// stat head-to-head panels — and every projection for that fight was built on a
+// 21-year-old PRIDE bout fought by a different man. It survived until the user
+// happened to look.
+//
+// This does NOT change resolution. Changing which candidate wins would alter
+// every fighter's lookup on the strength of one case, and [[project_manual_overrides]]
+// is explicit that a pin beats a generalised classifier fix here. This only makes
+// the silent case loud: a fighter carded TODAY whose most recent recorded fight
+// is years old is either a genuine long layoff or the wrong person, and both are
+// worth a look.
+//
+// DOB would be a second independent signal but UFCStats' DOB is not parsed into
+// CareerStats, so staleness is what we have. It was sufficient for the case that
+// motivated this: 21 years.
+const RESOLVE_STALE_YEARS = 4;    // notable layoff
+const RESOLVE_ALARM_YEARS = 8;    // almost certainly a different fighter
+function staleResolveCheck(
+  name: string,
+  history: FightResult[],
+  record: string | undefined,
+): { years: number; lastFight: string; record: string } | null {
+  // No dated history at all = debut or unparsed. Not evidence of anything.
+  const dated = (history || [])
+    .map((h) => ({ raw: h.date, t: h.date ? Date.parse(h.date) : NaN }))
+    .filter((x) => Number.isFinite(x.t))
+    .sort((a, b) => b.t - a.t);
+  if (!dated.length) return null;
+
+  const years = (Date.now() - dated[0].t) / (365.25 * 24 * 60 * 60 * 1000);
+  if (years < RESOLVE_STALE_YEARS) return null;
+
+  const out = { years: parseFloat(years.toFixed(1)), lastFight: String(dated[0].raw), record: String(record || '?') };
+  const how = years >= RESOLVE_ALARM_YEARS ? 'ALMOST CERTAINLY THE WRONG FIGHTER' : 'unusually stale — verify';
+  debugLog(`⚠ RESOLVE SUSPECT: ${name} — last fight ${out.lastFight} (${out.years}y ago), record ${out.record} — ${how}. `
+    + `If this is a same-name collision, pin the right UFCStats id in UFCSTATS_URL_OVERRIDES.`);
+  return out;
+}
+
 function buildFighterDB(name: string, ufcData: UFCStatsData|null): FighterDB {
   if (!ufcData) {
     return {
@@ -1430,6 +1480,7 @@ function buildFighterDB(name: string, ufcData: UFCStatsData|null): FighterDB {
     tdDef: careerStats?.tdDef || null,
     tdAcc: careerStats?.tdAcc || null,
     stance: careerStats?.stance || null,
+    resolveSuspect: staleResolveCheck(name, history, careerStats?.record),
     style: _fighterStyleOverrides.get(name.trim().toLowerCase()) ?? deriveStyle(careerStats),
     finishRate,
     avgFP_weighted,
@@ -24712,6 +24763,21 @@ function buildFighterRow(f: AnalyzerFighter, oppEntry: AnalyzerFighter|null, fig
           return `<button class="weight-miss-badge weight-miss-${wm.severity}" data-news-fighter="${f.name}" title="${tip}">⚖ MISS${lbsLabel ? ' ' + lbsLabel : ''}</button>`;
         })()}
         ${_newsAlertFighters.has(f.name.toLowerCase()) ? `<button class="news-warn-badge" data-news-fighter="${f.name}" title="Recent injury/withdrawal news detected — click for headlines">⚠ NEWS</button>` : ''}
+        ${(() => {
+          // Same-name resolution guard. A fighter carded today whose most recent
+          // recorded bout is years old is either a real long layoff or — the case
+          // this exists for — a DIFFERENT fighter who happens to share the name.
+          // The Jean Silva collision rendered a complete, plausible card off a
+          // 2005 PRIDE fight and was caught only because the user looked.
+          const rs = f.db?.resolveSuspect;
+          if (!rs) return '';
+          const alarm = rs.years >= 8;
+          const tip = `RESOLVED RECORD MAY BE THE WRONG FIGHTER. UFCStats has this name's most recent bout as ${rs.lastFight} — ${rs.years} years ago — with record ${rs.record}. `
+            + `A fighter on this card should have fought recently, so either this is a genuine long layoff or the alpha-page search matched a DIFFERENT fighter with the same name (it returns the first First+Last match, which is often a retired one). `
+            + `NAME_ALIASES cannot fix that — the strings are identical. Verify on UFCStats and, if it is the wrong man, pin the correct fighter-details id in UFCSTATS_URL_OVERRIDES. `
+            + `Everything on this card — projections, leans, head-to-head panels — is computed from the record shown here.`;
+          return `<div class="resolve-suspect-badge${alarm ? ' alarm' : ''}" title="${tip.replace(/"/g, '&quot;')}">⚠ CHECK FIGHTER · ${rs.years}y</div>`;
+        })()}
         ${hasNoHistory ? `<div class="nodata-badge" title="No UFCStats fight history for this fighter — every striking/grappling average computes to 0.0 from an empty log. The averages and deltas above are therefore blank rather than zero, because a zero here would be a measurement and this is an absence. Any lean shown is built WITHOUT a personal baseline: it can only be reading the line, the opponent and the matchup. Treat its confidence with suspicion.">⌀ NO HISTORY</div>` : ''}
         ${(() => {
           // v21 drops lines priced against a fighter who left the card. Without this

@@ -181,6 +181,10 @@ export interface FighterDB {
   oppHistory: OppFightResult[];
   loaded: boolean;
   detailUrl?: string | null;
+  /** Set when the resolved UFCStats record looks like it belongs to a DIFFERENT
+   *  fighter of the same name — see staleResolveCheck in analyzer.ts. Null when
+   *  the record looks consistent with someone on the current card. */
+  resolveSuspect?: { years: number; lastFight: string; record: string } | null;
 }
 
 // ── LINE DROP STATE ───────────────────────────────────────────────────────

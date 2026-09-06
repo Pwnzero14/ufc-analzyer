@@ -5372,6 +5372,23 @@ body.loading {
 .ls-lean-under { background: rgba(255,58,96,0.12); color: #ff3a60; }
 
 /* ── NEWS BADGE & MODAL ── */
+/* ── SAME-NAME RESOLUTION GUARD ──────────────────────────────────────────
+   Fires when the resolved UFCStats record's most recent fight is 4+ years old
+   for a fighter on the current card. Amber at 4-8 years (could be a real
+   layoff), red past 8 (almost certainly a different fighter of the same name).
+   Deliberately louder than the other badges: unlike NEWS or MISS, which qualify
+   a number, this one says the WHOLE CARD may be about someone else. */
+.resolve-suspect-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 800; letter-spacing: 0.08em;
+  padding: 2px 7px; border-radius: 4px; white-space: nowrap; cursor: help;
+  color: var(--amber); background: rgba(248,198,74,0.12);
+  border: 1px solid rgba(248,198,74,0.45);
+}
+.resolve-suspect-badge.alarm {
+  color: #ff6b6b; background: rgba(255,107,107,0.14);
+  border-color: rgba(255,107,107,0.55);
+}
 .news-warn-badge { display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: 700; background: rgba(255,170,60,0.14); color: #ffb24a; border: 1px solid rgba(255,170,60,0.32); cursor: pointer; white-space: nowrap; }
 /* v21 stale-opponent guard removed a line source for this fighter.
    VIOLET on purpose. The board's hues are already spoken for and must not be
