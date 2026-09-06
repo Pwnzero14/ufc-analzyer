@@ -8,7 +8,7 @@ import {
   PropArchiveRecord,
   WeightClass,
 } from './types/index.js';
-import { CONFIG, FANTASY_SCORING, PRIZEPICKS_SCORING, NAME_ALIASES } from './config/index.js';
+import { CONFIG, FANTASY_SCORING, PRIZEPICKS_SCORING, NAME_ALIASES, foldLetters } from './config/index.js';
 import { ufcstatsFetchText } from './services/ufcstats-fetch.js';
 import { calcFPForPlatform } from './analyzer/fantasy-scoring.js';
 
@@ -482,7 +482,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // all 19 call sites — leave it until something actually breaks on it.
 function normalizeFighterName(name: any): string | null {
   if (typeof name !== 'string') return null;
-  return name.normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+  // foldLetters first — NFD leaves standalone letters (L-stroke, o-slash,
+  // sharp-s, ...) untouched. See [[project_diacritic_name_split]].
+  return foldLetters(name).normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
 }
 
 function sanitizeOpponentName(raw: unknown, selfName?: string): string | null {
@@ -812,7 +814,7 @@ async function _fetchAndSettleFromUFCStats(opts?: { forceEventName?: string; inc
   // NOTE deliberately NOT applied to PropArchiveService.normalizeName: that one
   // feeds recordKey, so stripping there changes row IDENTITY and can merge or
   // split existing rows. That is a migration with a backup, not a one-liner.
-  const _baseNorm  = (s: string) => s.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '').normalize('NFD').replace(/[\u0300-\u036F]/g, '').replace(/\./g, '').replace(/-/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  const _baseNorm  = (s: string) => foldLetters(s.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')).normalize('NFD').replace(/[\u0300-\u036F]/g, '').replace(/\./g, '').replace(/-/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
   // Alias-aware name normalizer. Archive rows carry platform spellings (e.g.
   // "Yadong Song") while UFCStats parses the canonical form ("Song Yadong");
   // without this bridge those siblings never match and settle leaves orphans.

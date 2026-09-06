@@ -1,4 +1,4 @@
-import { NAME_ALIASES, MODEL_VERSION, FP_CONFIDENCE_CEILING, PICKEM_PAYOUTS, SS_PROJECTION_BIAS, SS_MARKET_ANCHOR_WEIGHT, FP_SHRINK_K, FP_LEAGUE_MEAN_SHARED } from './config/index.js';
+import { NAME_ALIASES, MODEL_VERSION, FP_CONFIDENCE_CEILING, PICKEM_PAYOUTS, SS_PROJECTION_BIAS, SS_MARKET_ANCHOR_WEIGHT, FP_SHRINK_K, FP_LEAGUE_MEAN_SHARED, foldLetters } from './config/index.js';
 import { PropArchiveService, PropLinePredictorService } from './services/index.js';
 import { ufcstatsFetchText } from './services/ufcstats-fetch.js';
 import { _weightMissSignals, parseWeightMissFromTitle, severityFromLbs, MANUAL_WEIGHT_MISS_KEY } from './analyzer/weight-miss.js';
@@ -24922,7 +24922,12 @@ function normalizeName(name) {
         return null;
     let n = name.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '').trim();
     // Strip diacritics so "Vin\u00EDcius" matches "Vinicius" (UFCStats/card uses plain ASCII).
-    n = n.normalize('NFD').replace(/[\u0300-\u036F]/g, '');
+    // foldLetters FIRST: NFD only decomposes COMBINING MARKS, so standalone letters
+    // (L-stroke, o-slash, sharp-s, ...) survive it untouched and then degrade to a
+    // SPACE once the [^a-z] filters downstream run. That is how "Klaudia Sygu?a"
+    // became the key "klaudia sygu a", surname token "a", and a real fighter on a
+    // live card was filed as a GHOST. See [[project_diacritic_name_split]].
+    n = foldLetters(n).normalize('NFD').replace(/[\u0300-\u036F]/g, '');
     // Drop platform country tags like "Andre (Bra) Lima" \u2192 "Andre Lima".
     n = n.replace(/\([^)]*\)/g, ' ');
     n = n.replace(/\./g, '').replace(/-/g, ' ').replace(/'/g, '').replace(/\s+/g, ' ').trim();
