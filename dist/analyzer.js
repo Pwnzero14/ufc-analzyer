@@ -1,4 +1,4 @@
-import { NAME_ALIASES, MODEL_VERSION, FP_CONFIDENCE_CEILING, PICKEM_PAYOUTS, SS_PROJECTION_BIAS, SS_MARKET_ANCHOR_WEIGHT } from './config/index.js';
+import { NAME_ALIASES, MODEL_VERSION, FP_CONFIDENCE_CEILING, PICKEM_PAYOUTS, SS_PROJECTION_BIAS, SS_MARKET_ANCHOR_WEIGHT, FP_SHRINK_K, FP_LEAGUE_MEAN_SHARED } from './config/index.js';
 import { PropArchiveService, PropLinePredictorService } from './services/index.js';
 import { ufcstatsFetchText } from './services/ufcstats-fetch.js';
 import { _weightMissSignals, parseWeightMissFromTitle, severityFromLbs, MANUAL_WEIGHT_MISS_KEY } from './analyzer/weight-miss.js';
@@ -4491,6 +4491,32 @@ function calcLean(name, db, line_p6, line_ud, line_pp, line_betr, moneyline, opp
                     'betr';
     const historyFP = history.map(h => getFightFantasyValueForPlatform(h, historyPlatform));
     const mlAdjFP = calcMLAdjustedFP(history, moneyline);
+    // ── MODEL v45 · FP THIN-HISTORY SHRINKAGE ───────────────────────────────
+    // Below 3 UFC fights a fighter's own FP average predicts WORSE than assuming
+    // they are league-average (measured: n=1-2, 485 fights, t=-2.46 on a
+    // pre-registered test). See the table above FP_SHRINK_K in config/index.ts.
+    //
+    // Applied to baseFP rather than to `avgFP` alone, because baseFP is the value
+    // the measurement actually evaluated — the personal prior — and it can arrive
+    // by either route (mlAdjFP or the platform average). Shrinking only one leaves
+    // the other unshrunk on exactly the thin-history fighters this is for.
+    //
+    // NOT applied to PrizePicks: the measurement was run on FANTASY_SCORING, so
+    // FP_LEAGUE_MEAN_SHARED is a P6/UD/Betr-scale number and PP scores lower.
+    // Pulling a PP average toward it would be worse than leaving it alone.
+    //
+    // `avgFP` itself is untouched, so the displayed "avg N" stays a true fact
+    // about the fighter — the model's input changes, the reported observation
+    // does not.
+    const fpSampleN = historyFP.filter((v) => typeof v === 'number' && Number.isFinite(v) && v > 0).length;
+    const fpShrinkApplies = historyPlatform !== 'prizepicks';
+    const shrinkFP = (raw) => {
+        if (raw == null || !Number.isFinite(raw))
+            return raw;
+        if (!fpShrinkApplies || fpSampleN <= 0)
+            return raw;
+        return parseFloat((((raw * fpSampleN) + (FP_LEAGUE_MEAN_SHARED * FP_SHRINK_K)) / (fpSampleN + FP_SHRINK_K)).toFixed(1));
+    };
     // ── Opp-adjusted FP projection ────────────────────────────────────────────
     // Use opponent's historical FP-allowed to estimate matchup-specific output.
     const oppFPSamples = (oppDB?.oppHistory ?? []).slice(0, 5)
@@ -4499,7 +4525,8 @@ function calcLean(name, db, line_p6, line_ud, line_pp, line_betr, moneyline, opp
     const oppAvgFPAllowed = oppFPSamples.length >= 3
         ? parseFloat((oppFPSamples.reduce((s, v) => s + v, 0) / oppFPSamples.length).toFixed(1))
         : null;
-    const baseFP = mlAdjFP ?? avgFP ?? null;
+    const rawBaseFP = mlAdjFP ?? avgFP ?? null;
+    const baseFP = shrinkFP(rawBaseFP);
     const projFP = (baseFP != null && oppAvgFPAllowed != null)
         ? parseFloat(((baseFP + oppAvgFPAllowed) / 2).toFixed(1))
         : null;
@@ -4507,6 +4534,20 @@ function calcLean(name, db, line_p6, line_ud, line_pp, line_betr, moneyline, opp
     const effectiveFP = projFP ?? baseFP ?? avgFP ?? null;
     const reasons = [];
     let score = 0;
+    // MODEL v45 — surface the shrink when it actually moved the input. A silent
+    // model change is one nobody can audit later, and this fires on exactly the
+    // rows already carrying GLOW-UP 306C's thin-history label, so the caveat and
+    // its cause now appear together instead of the user seeing one without the
+    // other. `icon: 'neu'` on purpose: it is a statement about the INPUT, not a
+    // directional argument, and factorPolarity would otherwise render it as a tick
+    // or a cross depending on the lean — see
+    // [[project_lean_reason_icon_is_directional]].
+    if (rawBaseFP != null && baseFP != null && Math.abs(rawBaseFP - baseFP) >= 3) {
+        reasons.push({
+            icon: 'neu',
+            text: `Thin history (${fpSampleN} fight${fpSampleN === 1 ? '' : 's'}): personal average ${rawBaseFP.toFixed(1)} shrunk to ${baseFP.toFixed(1)} toward league mean ${FP_LEAGUE_MEAN_SHARED} — measured, below 3 fights a fighter's own FP average predicts worse than assuming league-average`,
+        });
+    }
     // ── Venue / altitude / cage factors ──────────────────────────────────────
     if (currentVenueFactor.altitudeMeters >= 1200) {
         const altPenalty = currentVenueFactor.altitudeMeters >= 2000 ? -1.5

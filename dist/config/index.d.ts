@@ -157,7 +157,9 @@ export declare const PRIZEPICKS_SCORING: {
     };
 };
 export declare const NAME_ALIASES: Record<string, string>;
-export declare const MODEL_VERSION = 44;
+export declare const FP_SHRINK_K = 3;
+export declare const FP_LEAGUE_MEAN_SHARED = 69.4;
+export declare const MODEL_VERSION = 45;
 /** Strikes the raw SS projection runs above reality, removed before anchoring. */
 export declare const SS_PROJECTION_BIAS = 6;
 /** Weight on the de-biased projection vs the posted line (0.5 = plain average). */
