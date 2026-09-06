@@ -685,9 +685,30 @@ async function fetchFightDetails(url) {
         const statuses = statusMatches.slice(0, 2).map(m => m[1].toUpperCase());
         // Method and round — UFCStats structure: <i>Label: </i>value</i>
         // e.g. "Round: </i> 3 </i>" — value is plain text after the label's closing tag
-        const methodM = html.match(/Method:[^<]*<\/i>\s*([A-Za-z][^<\n]+)/i);
-        const roundM = html.match(/Round:[^<]*<\/i>\s*(\d+)/i);
-        const timeM = html.match(/Time:[^<]*<\/i>\s*(\d+):(\d+)/i);
+        // ── EXCEPT METHOD, WHICH IS TAG-WRAPPED. Verified against live markup: ──
+        //   <i class="b-fight-details__label">  Method:  </i>
+        //   <i style="font-style: normal"> KO/TKO </i>      <- value in its OWN tag
+        // Round and Time really are bare text; Method is not, and never has been. The
+        // old pattern demanded [A-Za-z] immediately after the label's </i>, hit the
+        // '<' of that wrapper, and returned null on EVERY fight this parser has read.
+        // `method` has therefore always been ''.
+        //
+        // Invisible for finishes, wrong for decisions. With method empty,
+        // winBonusForPlatform skips its /DEC/i branch and falls through to the ROUND
+        // table — correct for a KO/TKO or SUB, and pays a round-3 FINISH bonus to a
+        // fight that actually went to the cards:
+        //     FANTASY_SCORING   round3 45 vs decision 30  ->  +15
+        //     PRIZEPICKS        round3 30 vs decision 10  ->  +20
+        // Measured on Hooker/Parnasse: 34 archive rows wrong, all six decision
+        // WINNERS (losers score no bonus either way, finishers get the right one),
+        // deltas of exactly 15 and 20, and SEVEN graded picks flipped MISS -> HIT.
+        // Donchenko's FP read 96.8 against a true 81.83.
+        //
+        // `(?:<[^>]*>\s*)*` matches zero tags too, so applying it to all three is
+        // strictly safer than leaving Round/Time on the stricter pattern.
+        const methodM = html.match(/Method:[^<]*<\/i>\s*(?:<[^>]*>\s*)*([A-Za-z][^<\n]*)/i);
+        const roundM = html.match(/Round:[^<]*<\/i>\s*(?:<[^>]*>\s*)*(\d+)/i);
+        const timeM = html.match(/Time:[^<]*<\/i>\s*(?:<[^>]*>\s*)*(\d+):(\d+)/i);
         // Fallback is EMPTY, not 'Decision'. A miss here used to mint a decision out
         // of nothing, and the scorer pays a decision (30) where a round-1 finish pays
         // 90 + 25 — so an unreadable method quietly cost 85 points and looked like a
