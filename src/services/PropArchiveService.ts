@@ -50,7 +50,8 @@ function normalizeEvent(eventName: unknown): string {
   return eventName.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-function normalizePropType(propType: unknown): PropType {
+/** Exported so bulk repairs key rows the same way updateResult matches them. */
+export function normalizePropType(propType: unknown): PropType {
   const v = String(propType || '').trim();
   if (!v) return 'Fantasy';
   if (/^ss$/i.test(v)) return 'SS';

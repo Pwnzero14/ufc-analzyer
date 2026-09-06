@@ -1,5 +1,5 @@
 import { NAME_ALIASES, MODEL_VERSION, FP_CONFIDENCE_CEILING, PICKEM_PAYOUTS, SS_PROJECTION_BIAS, SS_MARKET_ANCHOR_WEIGHT, FP_SHRINK_K, FP_LEAGUE_MEAN_SHARED, FP_LEAGUE_MEAN_PP, foldLetters } from './config/index.js';
-import { PropArchiveService, PropLinePredictorService } from './services/index.js';
+import { PropArchiveService, PropLinePredictorService, normalizePropType } from './services/index.js';
 import { ufcstatsFetchText } from './services/ufcstats-fetch.js';
 import { _weightMissSignals, parseWeightMissFromTitle, severityFromLbs, MANUAL_WEIGHT_MISS_KEY } from './analyzer/weight-miss.js';
 import { _newsCache, _newsAlertFighters, NEWS_INJURY_KEYWORDS, fetchFighterNews, } from './analyzer/news.js';
@@ -18169,17 +18169,10 @@ async function renderArchivePanel(container) {
         btn.disabled = true;
         btn.textContent = '⏳ Repairing...';
         try {
-            const rowCount = async () => {
-                const raw = await storageGet(['prop_archive_v1']);
-                const rows = raw['prop_archive_v1'];
-                return Array.isArray(rows) ? rows.length : 0;
-            };
-            const before = await rowCount();
             const res = await healArchiveFromCache();
-            const after = await rowCount();
             // Row count is reported because this must only ever REWRITE results, never
             // add or drop rows — a change here is the signal something went wrong.
-            showToast(`✓ Repaired from ${res.fighters} cached fighters (${res.skipped} skipped) · rows ${before} → ${after}`);
+            showToast(`✓ ${res.rowsChanged} rows corrected from ${res.fighters} cached fighters · rows ${res.rowsBefore} → ${res.rowsAfter}`);
             void renderArchivePanel(container);
         }
         catch (err) {
@@ -26877,27 +26870,88 @@ const ctrlMinsOf = (secs) => Math.round((Number(secs) / 60) * 100) / 100;
 // scoring, because a second copy of the FP formula is exactly how this codebase
 // produced 2270 phantom findings once before.
 async function healArchiveFromCache() {
+    // ── ONE PASS. The obvious implementation — call archivePerformanceForRosterFighter
+    // per cached fighter — is quadratic and unusable: PropArchiveService.updateResult
+    // re-reads and re-scans the WHOLE archive on every call, and the repair makes ~6
+    // calls per fight x ~10 fights x ~370 fighters = ~22,000 scans of 42,880 rows.
+    // The first attempt sat on "REPAIRING…" indefinitely.
+    //
+    // So: read once, index once, correct in memory, write once.
+    //
+    // calcFPForPlatform is CALLED, not reimplemented — a second copy of the FP
+    // formula is how this repo produced 2270 phantom findings before.
     const all = await storageGetAll();
-    const keys = Object.keys(all).filter((k) => /^ufcstats_v51_/.test(k));
-    let fighters = 0, skipped = 0;
-    debugLog(`[repair] recomputing archived results from ${keys.length} cached fighters…`);
-    for (const k of keys) {
-        const rec = all[k];
-        if (!rec?.name || !Array.isArray(rec.fightHistory) || !rec.fightHistory.length) {
-            skipped++;
-            continue;
+    let rowsBefore = 0, rowsAfter = 0, fighters = 0, rowsChanged = 0;
+    const nf = (v) => (normalizeName(String(v ?? '')) || '').toLowerCase();
+    const ne = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+    // mutate() takes the write lock ONCE and does one read + one write. Writing
+    // prop_archive_v1 raw would race the scrape/settle writers — see the comment on
+    // runExclusive in PropArchiveService.
+    await PropArchiveService.mutate(async (archive) => {
+        rowsBefore = archive.length;
+        rowsAfter = archive.length;
+        if (!rowsBefore)
+            return archive;
+        const idx = new Map();
+        for (const r of archive) {
+            if (!r)
+                continue;
+            const k = `${nf(r.fighter)}|${ne(r.event)}|${String(normalizePropType(r.propType)).toLowerCase()}`;
+            const bucket = idx.get(k);
+            if (bucket)
+                bucket.push(r);
+            else
+                idx.set(k, [r]);
         }
-        try {
-            await archivePerformanceForRosterFighter(rec.name, rec, { bypassRoster: true });
+        for (const key of Object.keys(all)) {
+            if (!/^ufcstats_v51_/.test(key))
+                continue;
+            const rec = all[key];
+            if (!rec?.name || !Array.isArray(rec.fightHistory) || !rec.fightHistory.length)
+                continue;
             fighters++;
+            const who = nf(rec.name);
+            for (const f of rec.fightHistory) {
+                if (!f?.event)
+                    continue;
+                if (f.sigStr == null && f.totStr == null && f.kd == null && f.td == null && f.ctrlSecs == null)
+                    continue;
+                const won = f.result === 'win';
+                const ev = ne(f.event);
+                // CTRL is archived under BOTH 'ctrl' (settled, carries the line) and
+                // 'Control' (backfill) — see [[project_ctrl_archive_dual_proptype]].
+                const targets = [
+                    [['fantasy'], calcFPForPlatform('pick6', f.sigStr, f.totStr, f.ctrlSecs, f.timeSecs, f.kd, f.td, f.rev, f.sub, won, f.method, f.round)],
+                    [['fantasy_pp'], calcFPForPlatform('prizepicks', f.sigStr, f.totStr, f.ctrlSecs, f.timeSecs, f.kd, f.td, f.rev, f.sub, won, f.method, f.round)],
+                    [['ss'], f.sigStr ?? null],
+                    [['td'], f.td ?? null],
+                    [['ctrl', 'control'], f.ctrlSecs != null ? ctrlMinsOf(f.ctrlSecs) : null],
+                    [['fighttime'], f.timeSecs != null ? parseFloat((Number(f.timeSecs) / 60).toFixed(2)) : null],
+                ];
+                for (const [propTypes, value] of targets) {
+                    if (value == null || !Number.isFinite(Number(value)))
+                        continue;
+                    for (const pt of propTypes) {
+                        for (const row of idx.get(`${who}|${ev}|${pt}`) ?? []) {
+                            // Only ever REWRITE an existing result. Rows with no result are the
+                            // backfill's job (backfillUnresolvedFromKnownOutcomes); this pass is
+                            // for values that are present but WRONG, which that one cannot see.
+                            if (!Number.isFinite(Number(row.result)))
+                                continue;
+                            if (Math.abs(Number(row.result) - Number(value)) <= 0.005)
+                                continue;
+                            row.result = Number(value);
+                            rowsChanged++;
+                        }
+                    }
+                }
+            }
         }
-        catch (e) {
-            skipped++;
-            debugLog(`[repair] ${rec.name}: ${e.message}`);
-        }
-    }
-    debugLog(`[repair] done — ${fighters} fighters recomputed, ${skipped} skipped`);
-    return { fighters, skipped };
+        rowsAfter = archive.length;
+        return archive;
+    });
+    debugLog(`[repair] ${fighters} cached fighters · ${rowsChanged} rows corrected · ${rowsBefore} rows in, ${rowsAfter} out`);
+    return { fighters, rowsChanged, rowsBefore, rowsAfter };
 }
 async function archivePerformanceForRosterFighter(name, ufcData, opts) {
     if (!ufcData?.fightHistory?.length)
