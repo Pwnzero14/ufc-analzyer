@@ -1,16 +1,17 @@
 ﻿# Resume Checkpoint
 
-Last Saved: 2026-09-06 17:00:00 -04:00
+Last Saved: 2026-09-06 17:30:00 -04:00
 Repository: C:\Users\abdir\Downloads\ufc_project_v2
 Branch: feature/sleek-theme-v1
-HEAD: 89418c3
+HEAD: 3f1b42d
 
 ## Last Notes
 ################################################################################
 ##  START HERE — 2026-09-06 SESSION CLOSE                                      ##
 ################################################################################
 
-ONE ITEM LEFT ON THE QUEUE, and it is deliberately unresolved:
+ONE ITEM LEFT ON THE QUEUE, and it is deliberately unresolved.
+Everything else queued has shipped — 7 items, all verified. See below.
 
   · THE -5 / -10 ARCHIVE TAIL. 24 rows at -5 and 6 at -10 where the stored value
     sits BELOW a recomputation from the ufcstats cache, INCLUDING LOSSES — and on
@@ -117,6 +118,60 @@ Everything else that was queued is done and verified — see below.
    zero-cost rather than a tradeoff.
    NOTE: `unlimitedStorage` IS in the manifest, so the 10MB ceiling does not
    apply and space was never the constraint. Do not re-derive a quota panic.
+
+################################################################################
+##  ALSO SHIPPED 2026-09-06 (later in the same session)                        ##
+################################################################################
+
+6. SAME-NAME RESOLUTION DETECTOR — the Jean Silva class, made loud.
+   `staleResolveCheck()` (analyzer.ts, just above buildFighterDB) sets
+   `FighterDB.resolveSuspect` when a fighter on the CURRENT card has a most-recent
+   RECORDED bout 4+ years old. The card renders a `CHECK FIGHTER · Ny` badge —
+   amber 4-8 years, red past 8.
+   *** IT DOES NOT CHANGE RESOLUTION, DELIBERATELY. *** Preferring the most
+   recently active candidate would fix the class but alters EVERY fighter's
+   lookup off one case, and [[project_manual_overrides]] is explicit that a pin
+   beats a generalised classifier fix. Pins remain the fix; this only makes the
+   silent case visible so a pin gets written.
+   Replayed with the shipped thresholds:
+       RED    Jean "White Bear" Silva (the bug)   last Jul 2005  21.1y
+       clean  Jean "Lord" Silva       (correct)   no flag
+       clean  Dan Hooker                          no flag
+       RED    Mike Davis (old Strikeforce)        last Mar 2012  14.5y
+       clean  debut fighter, no dated history     no flag
+       AMBER  genuine 5-year layoff               last Aug 2021   5.1y
+   It retroactively catches BOTH collisions already pinned in
+   UFCSTATS_URL_OVERRIDES, neither of which announced itself at the time.
+   KNOWN LIMIT: it catches collisions where the WRONG fighter is retired. Two
+   ACTIVE fighters sharing a name would both look fresh and slip through.
+   WHY STALENESS AND NOT DOB: UFCStats publishes DOB but it is not parsed into
+   CareerStats. Staleness sufficed at 21 years; DOB would be a second independent
+   signal if this ever proves noisy.
+   WILL NOT FIRE ON THE CURRENT BOARD — Silva is pinned. It is forward-looking by
+   design, for a collision nobody will be watching for.
+
+7. MODEL v46 — FP SHRINKAGE EXTENDED TO PRIZEPICKS.
+   `FP_LEAGUE_MEAN_PP = 50.8`, same K=3, calcLean selects by historyPlatform.
+   Measured with PRIZEPICKS_SCORING, 2593 fights / 2254 pairs: mean 50.84,
+   median 56.0 — 0.733x the shared scale, the right order for a formula with sig
+   strikes only, no non-sig, no control time, no reversals, ~half the win bonuses.
+       n=1    277  personal 26.7  league 22.3  diff -4.45  t 3.34  significant
+       n=2    252           24.8         22.6       -2.22  t 2.17  significant
+       n=1-2  529           25.8         22.4       -3.39  t 3.98  significant
+       n=3-5  589           23.4         22.7       -0.61  t 1.15  no
+       n=6-9  515           23.4         23.9       +0.47  t -1.01 no  <- crossover
+       n>=10  621           24.8         24.9       +0.07  t -0.20 no
+   INDEPENDENTLY the same shape as the shared scale, crossover at n~6, so K=3
+   carried over UNCHANGED rather than being re-fitted. Shrunk was BEST in every
+   bucket at K = 2, 3, 4 and 6, differing ~0.1 MAE — robust to the choice, not
+   balanced on it.
+   *** WHY v45's EXCLUSION WAS CORRECTNESS, NOT CAUTION: *** the shared mean on
+   PP would have inflated thin baselines by ~14 points (raw 10 at n=1 -> 40.6 on
+   the PP mean vs 54.6 on the shared one) — worse than not shrinking at all.
+   When two platforms score on different scales, a shared constant is not a
+   conservative default, it is a wrong answer.
+   SAME CAVEAT AS v45: this validates the baseline INPUT, not the final lean.
+   Grade v46 vs v45 vs v44 in the archive once events settle.
 
 ################################################################################
 ##  ARCHIVE ROW COUNT MOVES ON ITS OWN — do not read it as corruption          ##
