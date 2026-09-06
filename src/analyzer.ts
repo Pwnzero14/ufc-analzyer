@@ -1521,6 +1521,56 @@ function ufcstatsCacheTtlMs(name: string): number {
   return 86400000 + (h % (8 * 60 * 60 * 1000));
 }
 
+// ── A FIGHTER WHO HAS FOUGHT SINCE THE FETCH IS STALE, WHATEVER THE CLOCK SAYS ─
+// The TTL above is 24h + 0-8h of name-hash jitter and knows only elapsed time.
+// That is fine for idle fighters and wrong for exactly the ones that matter.
+//
+// Measured on the Hooker/Parnasse card (2026-09-05). Everyone was fetched at
+// 21:17 the night before; the card finished; and 22.8h later every read still
+// returned "Cache hit" because the TTLs run to:
+//     Daniil Donchenko 31.86h -> 09-06 05:09     Dan Hooker 27.36h -> 09-06 00:39
+//     Punahele Soriano 31.52h -> 09-06 04:48     Oumar Sy   26.94h -> 09-06 00:13
+// So `fightHistory` had no post-fight row, the settle heal path had nothing to
+// heal FROM, and provisional Fantasy values stood uncorrected — Donchenko graded
+// 96.8 against a real 81.83, turning a MISS into a HIT on the board and in the
+// archive the learning cycle reads. It presented as a scoring bug and was not
+// one: the arithmetic was right, the INPUT was a day old.
+//
+// The rule: if the cached copy predates the point where results for a card this
+// fighter is on would exist, treat it as expired no matter how young it is.
+// `resultsAt` = event midnight + 18h, which clears even a late finish. It is
+// self-limiting — once a fetch lands after resultsAt the condition stops firing,
+// so this cannot loop.
+interface _CompletedCardStamp { resultsAt: number; event: string }
+let _cardResultStamps: Map<string, _CompletedCardStamp> | null = null;
+async function loadCardResultStamps(): Promise<Map<string, _CompletedCardStamp>> {
+  if (_cardResultStamps) return _cardResultStamps;
+  const map = new Map<string, _CompletedCardStamp>();
+  try {
+    const raw = await storageGet<Record<string, any>>(['upcoming_ufc_card', 'last_completed_ufc_card']);
+    // BOTH keys, deliberately. `upcoming_ufc_card` still names the card that just
+    // finished until the event flips, which is precisely the window this fixes.
+    for (const key of ['upcoming_ufc_card', 'last_completed_ufc_card']) {
+      const card = raw[key] as { event?: string; date?: string; fighters?: Array<{ f1: string; f2: string }> } | undefined;
+      if (!card?.fighters?.length || !card.date) continue;
+      const iso = toIsoDateOrNull(card.date);
+      if (!iso) continue;
+      const resultsAt = new Date(`${iso}T00:00:00`).getTime() + 18 * 60 * 60 * 1000;
+      if (!Number.isFinite(resultsAt) || Date.now() < resultsAt) continue; // not over yet
+      for (const ft of card.fighters) {
+        for (const nm of [ft?.f1, ft?.f2]) {
+          const k = (normalizeName(nm) || String(nm || '')).toLowerCase();
+          if (!k) continue;
+          const prev = map.get(k);
+          if (!prev || resultsAt > prev.resultsAt) map.set(k, { resultsAt, event: card.event || key });
+        }
+      }
+    }
+  } catch { /* storage unavailable — fall back to the plain TTL */ }
+  _cardResultStamps = map;
+  return map;
+}
+
 async function fetchFromUFCStats(name: string): Promise<UFCStatsData|null> {
   const aliased = UFCSTATS_NAME_ALIASES[name.trim().toLowerCase()];
   if (aliased && aliased !== name) {
@@ -1531,8 +1581,14 @@ async function fetchFromUFCStats(name: string): Promise<UFCStatsData|null> {
   if (typeof chrome !== 'undefined' && chrome.storage) {
     const cached = await storageGet<Record<string, UFCStatsData | undefined>>([cacheKey]);
     if (cached[cacheKey] && (Date.now() - cached[cacheKey].fetchedAt < ufcstatsCacheTtlMs(name))) {
-      debugLog(`Cache hit: ${name}`);
-      return cached[cacheKey];
+      // Within the TTL, but did this fighter compete since we cached them?
+      const stamp = (await loadCardResultStamps()).get((normalizeName(name) || name).toLowerCase());
+      if (stamp && cached[cacheKey]!.fetchedAt < stamp.resultsAt) {
+        debugLog(`Cache STALE-BY-EVENT: ${name} — cached ${new Date(cached[cacheKey]!.fetchedAt).toISOString()} predates results for ${stamp.event}; re-fetching`);
+      } else {
+        debugLog(`Cache hit: ${name}`);
+        return cached[cacheKey];
+      }
     }
   }
   try {

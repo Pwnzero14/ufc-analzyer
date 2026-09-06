@@ -1363,6 +1363,41 @@ function ufcstatsCacheTtlMs(name) {
         h = (h * 31 + name.charCodeAt(i)) >>> 0;
     return 86400000 + (h % (8 * 60 * 60 * 1000));
 }
+let _cardResultStamps = null;
+async function loadCardResultStamps() {
+    if (_cardResultStamps)
+        return _cardResultStamps;
+    const map = new Map();
+    try {
+        const raw = await storageGet(['upcoming_ufc_card', 'last_completed_ufc_card']);
+        // BOTH keys, deliberately. `upcoming_ufc_card` still names the card that just
+        // finished until the event flips, which is precisely the window this fixes.
+        for (const key of ['upcoming_ufc_card', 'last_completed_ufc_card']) {
+            const card = raw[key];
+            if (!card?.fighters?.length || !card.date)
+                continue;
+            const iso = toIsoDateOrNull(card.date);
+            if (!iso)
+                continue;
+            const resultsAt = new Date(`${iso}T00:00:00`).getTime() + 18 * 60 * 60 * 1000;
+            if (!Number.isFinite(resultsAt) || Date.now() < resultsAt)
+                continue; // not over yet
+            for (const ft of card.fighters) {
+                for (const nm of [ft?.f1, ft?.f2]) {
+                    const k = (normalizeName(nm) || String(nm || '')).toLowerCase();
+                    if (!k)
+                        continue;
+                    const prev = map.get(k);
+                    if (!prev || resultsAt > prev.resultsAt)
+                        map.set(k, { resultsAt, event: card.event || key });
+                }
+            }
+        }
+    }
+    catch { /* storage unavailable — fall back to the plain TTL */ }
+    _cardResultStamps = map;
+    return map;
+}
 async function fetchFromUFCStats(name) {
     const aliased = UFCSTATS_NAME_ALIASES[name.trim().toLowerCase()];
     if (aliased && aliased !== name) {
@@ -1373,8 +1408,15 @@ async function fetchFromUFCStats(name) {
     if (typeof chrome !== 'undefined' && chrome.storage) {
         const cached = await storageGet([cacheKey]);
         if (cached[cacheKey] && (Date.now() - cached[cacheKey].fetchedAt < ufcstatsCacheTtlMs(name))) {
-            debugLog(`Cache hit: ${name}`);
-            return cached[cacheKey];
+            // Within the TTL, but did this fighter compete since we cached them?
+            const stamp = (await loadCardResultStamps()).get((normalizeName(name) || name).toLowerCase());
+            if (stamp && cached[cacheKey].fetchedAt < stamp.resultsAt) {
+                debugLog(`Cache STALE-BY-EVENT: ${name} — cached ${new Date(cached[cacheKey].fetchedAt).toISOString()} predates results for ${stamp.event}; re-fetching`);
+            }
+            else {
+                debugLog(`Cache hit: ${name}`);
+                return cached[cacheKey];
+            }
         }
     }
     try {
