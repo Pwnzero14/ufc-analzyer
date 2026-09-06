@@ -664,9 +664,29 @@ export function foldLetters(s) {
 }
 export const FP_SHRINK_K = 3;
 export const FP_LEAGUE_MEAN_SHARED = 69.4;
+// PrizePicks scores on its own formula — sig strikes only at 0.5, NO non-sig, NO
+// control time, NO reversals, no quick-finish bonus, and win bonuses roughly half
+// the shared table — so it needs its OWN mean. v45 excluded PP rather than pull a
+// PP average toward a Pick6-scale number.
+//
+// MEASURED 2026-09-06 with PRIZEPICKS_SCORING over the same caches, 2593 fights /
+// 2254 pairs: mean 50.84, median 56.0 (0.733x the shared scale, the right order
+// for that formula). The personal-vs-league pattern is INDEPENDENTLY the same
+// shape as the shared scale, which is why K=3 carries over unchanged:
+//     n=1    277  personal 26.7  league 22.3  diff -4.45  t 3.34  significant
+//     n=2    252           24.8         22.6       -2.22  t 2.17  significant
+//     n=1-2  529           25.8         22.4       -3.39  t 3.98  significant
+//     n=3-5  589           23.4         22.7       -0.61  t 1.15  no
+//     n=6-9  515           23.4         23.9       +0.47  t -1.01 no   <- crossover
+//     n>=10  621           24.8         24.9       +0.07  t -0.20 no
+// K is taken from that crossover (n~6), NOT fitted: shrunk came out BEST in every
+// bucket at K = 2, 3, 4 and 6, differing by ~0.1 MAE, so the result is robust to
+// the choice rather than balanced on it.
+export const FP_LEAGUE_MEAN_PP = 50.8;
 // v45: FP thin-history shrinkage in the LEAN engine (the predictor already
 // shrinks separately — see [[project_fp_predictor_regression_to_mean]]).
-export const MODEL_VERSION = 45;
+// v46: that shrinkage extended to PrizePicks, against its own measured mean.
+export const MODEL_VERSION = 46;
 // MODEL v37 · SS market anchor. See the v37 note above for the measurement.
 /** Strikes the raw SS projection runs above reality, removed before anchoring. */
 export const SS_PROJECTION_BIAS = 6;

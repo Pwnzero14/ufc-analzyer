@@ -1,6 +1,6 @@
 import { FighterDB, FightResult, FightStats, CareerStats } from './types/index.js';
 import type { LineWatchSettings, LineMovementEvent, WatchPlatform, WatchedStatType } from './types/index.js';
-import { FANTASY_SCORING, PRIZEPICKS_SCORING, NAME_ALIASES, MODEL_VERSION, FP_CONFIDENCE_CEILING, PICKEM_PAYOUTS, SS_PROJECTION_BIAS, SS_MARKET_ANCHOR_WEIGHT, FP_SHRINK_K, FP_LEAGUE_MEAN_SHARED, foldLetters } from './config/index.js';
+import { FANTASY_SCORING, PRIZEPICKS_SCORING, NAME_ALIASES, MODEL_VERSION, FP_CONFIDENCE_CEILING, PICKEM_PAYOUTS, SS_PROJECTION_BIAS, SS_MARKET_ANCHOR_WEIGHT, FP_SHRINK_K, FP_LEAGUE_MEAN_SHARED, FP_LEAGUE_MEAN_PP, foldLetters } from './config/index.js';
 import { PropArchiveService, PropLinePredictorService } from './services/index.js';
 import { ufcstatsFetchText } from './services/ufcstats-fetch.js';
 import type { PropArchiveRecord, PropPrediction, PredictionEvent, LearningResult, WeightClass, StatPrediction, BacktestCell, PredictorLineBacktest, BookCalibration } from './types/index.js';
@@ -5299,9 +5299,12 @@ function calcLean(
   // by either route (mlAdjFP or the platform average). Shrinking only one leaves
   // the other unshrunk on exactly the thin-history fighters this is for.
   //
-  // NOT applied to PrizePicks: the measurement was run on FANTASY_SCORING, so
-  // FP_LEAGUE_MEAN_SHARED is a P6/UD/Betr-scale number and PP scores lower.
-  // Pulling a PP average toward it would be worse than leaving it alone.
+  // v46: PrizePicks included, against its OWN measured mean (50.8 vs the shared
+  // 69.4). v45 excluded it because the original measurement ran on
+  // FANTASY_SCORING; PP was then measured separately and showed the same shape —
+  // personal average significantly worse below 3 fights, crossover at n~6 — so
+  // K=3 carries over unchanged. Using one mean for both scales would have been
+  // worse than not shrinking PP at all, which is why v45 waited.
   //
   // `avgFP` itself is untouched, so the displayed "avg N" stays a true fact
   // about the fighter — the model's input changes, the reported observation
@@ -5309,12 +5312,12 @@ function calcLean(
   const fpSampleN = historyFP.filter(
     (v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0,
   ).length;
-  const fpShrinkApplies = historyPlatform !== 'prizepicks';
+  const fpLeagueMean = historyPlatform === 'prizepicks' ? FP_LEAGUE_MEAN_PP : FP_LEAGUE_MEAN_SHARED;
   const shrinkFP = (raw: number | null): number | null => {
     if (raw == null || !Number.isFinite(raw)) return raw;
-    if (!fpShrinkApplies || fpSampleN <= 0) return raw;
+    if (fpSampleN <= 0) return raw;
     return parseFloat(
-      (((raw * fpSampleN) + (FP_LEAGUE_MEAN_SHARED * FP_SHRINK_K)) / (fpSampleN + FP_SHRINK_K)).toFixed(1),
+      (((raw * fpSampleN) + (fpLeagueMean * FP_SHRINK_K)) / (fpSampleN + FP_SHRINK_K)).toFixed(1),
     );
   };
 
@@ -5348,7 +5351,7 @@ function calcLean(
   if (rawBaseFP != null && baseFP != null && Math.abs(rawBaseFP - baseFP) >= 3) {
     reasons.push({
       icon: 'neu',
-      text: `Thin history (${fpSampleN} fight${fpSampleN === 1 ? '' : 's'}): personal average ${rawBaseFP.toFixed(1)} shrunk to ${baseFP.toFixed(1)} toward league mean ${FP_LEAGUE_MEAN_SHARED} — measured, below 3 fights a fighter's own FP average predicts worse than assuming league-average`,
+      text: `Thin history (${fpSampleN} fight${fpSampleN === 1 ? '' : 's'}): personal average ${rawBaseFP.toFixed(1)} shrunk to ${baseFP.toFixed(1)} toward league mean ${fpLeagueMean} — measured, below 3 fights a fighter's own FP average predicts worse than assuming league-average`,
     });
   }
 
