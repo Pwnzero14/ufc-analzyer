@@ -1,11 +1,96 @@
 ﻿# Resume Checkpoint
 
-Last Saved: 2026-09-04 19:05:00 -04:00
+Last Saved: 2026-09-05 20:40:00 -04:00
 Repository: C:\Users\abdir\Downloads\ufc_project_v2
 Branch: feature/sleek-theme-v1
 HEAD: 4f65cbb
 
 ## Last Notes
+################################################################################
+##  *** DO THIS FIRST — user's explicit instruction, 2026-09-05 ***            ##
+################################################################################
+CLOSE THE SETTLE HEAL ORPHAN WINDOW. Two gates, both still open. Fix before the
+Noche UFC card (2026-09-12) settles, or it lands in the same trap Paris did.
+
+  1. `last_completed_ufc_card` NEVER ADVANCES.
+     `StorageService.setLastCompletedCard` exists (src/services/StorageService.ts
+     ~172) but is not called when the event flips. After Paris it still read
+     "UFC Fight Night: Hernandez vs. Rodrigues" (Aug 22) while upcoming_ufc_card
+     had already moved to "Noche UFC: Silva vs. Delgado" (Sep 12) — so the card
+     that just finished was in NEITHER record. Find the flip site (where
+     upcoming_ufc_card is replaced) and set the outgoing card as completed there.
+     *** This also neuters the cache-staleness fix shipped 2026-09-04 ***, which
+     keys off those two records to decide a cached fighter has fought since the
+     fetch. That fix is correct and currently inert.
+
+  2. THE HEAL PATH IS GATED ON THE CURRENT BOARD.
+     analyzer.ts ~27025 `if (!roster.has(fighterNorm.toLowerCase())) return;`
+     with `rosterNameSet()` reading `allFighters`. Once the board shows the next
+     card, the previous card's fighters can NEVER heal. Widen it to also admit
+     fighters on last_completed_ufc_card (which item 1 makes reliable), or scope
+     the heal by event rather than by roster.
+
+  WHY IT MATTERS: results computed provisionally during/just after an event
+  freeze permanently. On Paris that preserved a Fantasy value that graded a MISS
+  as a HIT. Neither the Settle nor Force Backfill button rescues it —
+  backfillUnresolvedFromKnownOutcomes only fills rows whose `result` is MISSING,
+  so a present-but-WRONG row is invisible to it.
+  Full write-up: [[project_settle_heal_orphan_window]].
+
+################################################################################
+##  2026-09-05 POST-CARD — THE METHOD PARSE BUG (FOUND, FIXED, DATA CORRECTED) ##
+################################################################################
+User spotted ONE wrong grade (Donchenko 96.8, real 81.83). Root cause was a
+single regex, and my first theory (control time, from a 14.97 = 499s x 0.03
+coincidence) was WRONG — it only fell when the real per-fight stats were put
+beside the stored ones.
+
+UFCStats wraps the Method VALUE in its own tag; Round and Time are bare text:
+    <i class="b-fight-details__label">  Method:  </i>
+    <i style="font-style: normal"> KO/TKO </i>
+The parser demanded [A-Za-z] right after the label's </i>, hit that '<', and
+returned null — so `method` was '' on EVERY fight it ever read. Empty method
+falls through to the ROUND table: right by luck for a KO/SUB, and a round-3
+FINISH bonus for a fight that went to the cards.
+    FANTASY_SCORING  round3 45 vs decision 30 -> +15
+    PRIZEPICKS       round3 30 vs decision 10 -> +20
+Blast radius therefore = decision WINNERS ONLY. Predicted, then matched exactly.
+
+SHIPPED: tolerant `(?:<[^>]*>\s*)*` on Method/Round/Time in src/background.ts.
+CORRECTED: 26 Paris rows across BOTH shadow event spellings, 0 remaining, row
+count unchanged. 7 graded picks moved HIT -> MISS (3 of Donchenko's 4 FP legs,
+both of Michael Page's).
+AUDITED CLEAN: 328 non-FP rows (SS/TD/KD/ctrl) verified against UFCStats — the
+defect could never touch them, since none feed winBonus.
+
+HISTORY SWEEP: 4890 rows matched against truth recomputed from the local
+ufcstats_v51 cache (362 fighters / 2575 fights / 0 missing method). 4826 correct
+(98.7%), 64 wrong, 4 grade flips. The wrong ones are the OPPOSITE, older defect —
+the era when an unreadable method MINTED a decision and underpaid finishes by 60
+(Fantasy) / 40 (PP). 3 corrected, all MISS -> HIT in the user's favour.
+History is mostly clean because the analyzer BACKFILL re-derives from
+fightHistory, whose method the analyzer's own fetcher parses fine ("U-DEC"). A
+card only keeps the defect when the heal never reaches it — i.e. the orphan
+window above.
+
+*** LEFT ALONE ON PURPOSE, do not "fix" without evidence: ***
+  · 24 rows at -5 and 6 at -10, INCLUDING LOSSES (win bonus is 0 either way, so
+    it must be a stat term: 5 = a takedown or reversal, 10 = a knockdown).
+    Cause unverified, ZERO grade flips. Correcting on the theory alone would
+    repeat this week's three false positives.
+  · 7572 rows unmatched (no cached fighter record) — UNAUDITED, not clean.
+    Sweep coverage was 39%.
+
+*** A NEGATIVE RESULT WORTH KEEPING: arithmetic ALONE cannot tell a decision
+from a round-3 finish. *** The bonus gap is 20, which is divisible by 4, so the
+PrizePicks residue test (Fantasy_PP - (0.5*SS + 10*KD + 5*TD) = 4*sub + WB) is
+degenerate — both hypotheses always fit. The Fantasy side is underdetermined too
+(nonSig, rev unknown). You need the real `method`. Do not try to infer it.
+
+OTHER RESULT: Oumar Sy landed 3 takedowns; the TD UNDER 2.5 LOST. The pre-card
+read (0/5 him, 0/13 conceded by Bukauskas, 18 fights without it ever happening)
+was sound and it happened on the 19th. Variance, not a bad read.
+
 ################################################################################
 ##  START HERE - 2026-09-04 SESSION CLOSE (card is TOMORROW, 2026-09-05)       ##
 ################################################################################
