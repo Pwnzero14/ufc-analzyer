@@ -27048,13 +27048,72 @@ function toIsoDateOrNull(raw: string | null | undefined): string | null {
   return null;
 }
 
+// ── THE HEAL MUST OUTLIVE THE BOARD ──────────────────────────────────────
+// `allFighters` is the CURRENT card. Gating the heal on it alone means that the
+// moment the board flips to the next event, the card that just finished can
+// never be corrected again — its provisional results freeze permanently. That
+// is what left Donchenko graded 96.8 against a real 81.83 after the 2026-09-05
+// Paris card, a MISS recorded as a HIT. See [[project_settle_heal_orphan_window]].
+//
+// Populated by loadCompletedCardRoster() from `last_completed_ufc_card`. Empty
+// until that runs, so the union degrades to the old behaviour rather than
+// throwing.
+let _completedCardRoster: Set<string> = new Set();
+
 function rosterNameSet(): Set<string> {
   const set = new Set<string>();
   for (const f of allFighters) {
     const n = normalizeName(f.name);
     if (n) set.add(n.toLowerCase());
   }
+  for (const n of _completedCardRoster) set.add(n);
   return set;
+}
+
+async function loadCompletedCardRoster(): Promise<{ event: string; names: string[] } | null> {
+  const raw = await storageGet<Record<string, { event?: string; date?: string; fighters?: Array<{ f1: string; f2: string }> }>>(['last_completed_ufc_card']);
+  const card = raw['last_completed_ufc_card'];
+  if (!card?.fighters?.length) return null;
+  const set = new Set<string>();
+  const names: string[] = [];
+  for (const ft of card.fighters) {
+    for (const nm of [ft?.f1, ft?.f2]) {
+      if (!nm) continue;
+      names.push(String(nm));
+      const n = normalizeName(nm);
+      if (n) set.add(n.toLowerCase());
+    }
+  }
+  _completedCardRoster = set;
+  return { event: String(card.event || ''), names };
+}
+
+// ── ONE-SHOT BACKFILL OF THE CARD THAT JUST FINISHED ─────────────────────
+// Widening the roster is necessary but not sufficient: archivePerformanceFor-
+// RosterFighter only ever runs from fetchFighterStats, and that is only called
+// for fighters on the CURRENT board. Nothing would ever fetch the previous
+// card's fighters, so nothing would heal. This does, exactly once per event.
+//
+// Guarded by a marker keyed on the event name so a page refresh does not re-run
+// 28 UFCStats fetches. Sequential on purpose — UFCStats carries a proof-of-work
+// challenge and parallel bursts are how you get rate-limited.
+const COMPLETED_HEAL_MARK = 'last_completed_card_healed_v1';
+async function healLastCompletedCard(): Promise<void> {
+  try {
+    const loaded = await loadCompletedCardRoster();
+    if (!loaded || !loaded.event) return;
+    const mark = await storageGet<Record<string, string>>([COMPLETED_HEAL_MARK]);
+    if (mark[COMPLETED_HEAL_MARK] === loaded.event) return;   // already done
+    debugLog(`[heal] last completed card "${loaded.event}" — backfilling ${loaded.names.length} fighters`);
+    let ok = 0;
+    for (const nm of loaded.names) {
+      try { await fetchFighterStats(nm); ok++; } catch { /* one bad name must not stop the rest */ }
+    }
+    await storageSet({ [COMPLETED_HEAL_MARK]: loaded.event });
+    debugLog(`[heal] "${loaded.event}" done — ${ok}/${loaded.names.length} fighters fetched`);
+  } catch (e) {
+    debugLog(`[heal] failed: ${(e as Error).message}`);
+  }
 }
 
 // ── CTRL archive units ───────────────────────────────────────────────────
@@ -29200,6 +29259,10 @@ function bindExclusiveButtons(selector: string, onActivate: (el: HTMLElement) =>
 function initAnalyzerCore(): void {
   // Load any persisted manual style overrides before predictions/fighter DBs build.
   void applyFighterStyleOverrides();
+
+  // Backfill the card that just finished, once. Deferred so it never competes
+  // with the current board's own fetches for the main thread or for UFCStats.
+  setTimeout(() => { void healLastCompletedCard(); }, 20000);
 
   // Platform switcher
   document.querySelectorAll('[data-platform]').forEach(btn => {
