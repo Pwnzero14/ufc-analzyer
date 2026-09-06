@@ -1508,6 +1508,19 @@ const UFCSTATS_NAME_ALIASES: Record<string, string> = {
 // c8661e204c66f325) instead of the current UFC lightweight.
 const UFCSTATS_URL_OVERRIDES: Record<string, string> = {
   'mike davis': 'fb3e61720be4690c',
+  // "Jean Silva" (Noche UFC: Silva vs. Delgado, 2026-09-12). TWO fighters, and
+  // the alpha page returns the wrong one first:
+  //   9211aae062b799d6  Jean "White Bear" Silva  19-12-3, DOB 1977, ONE fight
+  //                     on record — PRIDE Bushido 8, Jul 2005, vs Takanori Gomi
+  //   52ef95b5860fb28c  Jean "Lord" Silva        17-3-0,  DOB 1996, the UFC
+  //                     featherweight actually fighting Jose Delgado
+  // The board rendered White Bear: 19-12-3, avg FP 4.8, an SS history whose only
+  // entry is Gomi in '05. Every projection for this fight was built on a
+  // 21-year-old PRIDE bout by a different man.
+  // findDetailUrl returns the FIRST row whose first+last cells match, so two
+  // identical names are decided by page order — NAME_ALIASES cannot help, since
+  // the strings are the same. Pin it.
+  'jean silva': '52ef95b5860fb28c',
 };
 
 // A flat 24h TTL expires a whole card's cache in lockstep — every fighter written on one
