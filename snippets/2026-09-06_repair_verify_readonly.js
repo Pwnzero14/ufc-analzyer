@@ -49,7 +49,6 @@
     "Liu Ce": "Liu Ce",
     "Cong Wang": "Wang Cong",
     "Muhammad Said": "Muhammad Saidov",
-    "Damon Jackson": "Donte Johnson",
     "Myktybek Orolbai": "Myktybek Orolbai Uulu",
     "Orolbai": "Myktybek Orolbai Uulu",
     "Kevin Vallejos": "Kevin Vallejos",

@@ -25,8 +25,7 @@
  */
 (async () => {
   'use strict';
-  const ALIASES = 
-{
+  const ALIASES = {
     "Jung Young Lee": "Jeongyeong Lee",
     "Jungyoung Lee": "Jeongyeong Lee",
     "Su Sumudaerji": "Su Mudaerji",
@@ -57,7 +56,6 @@
     "Liu Ce": "Liu Ce",
     "Cong Wang": "Wang Cong",
     "Muhammad Said": "Muhammad Saidov",
-    "Damon Jackson": "Donte Johnson",
     "Myktybek Orolbai": "Myktybek Orolbai Uulu",
     "Orolbai": "Myktybek Orolbai Uulu",
     "Kevin Vallejos": "Kevin Vallejos",
