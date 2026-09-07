@@ -294,8 +294,24 @@ export class PropArchiveService {
                     }
                 }
             }
+            // Last-resort rescue for a call whose event NAME does not match the archive's
+            // spelling (platforms and UFCStats disagree constantly). It used to accept the
+            // lone candidate unconditionally, which also let a settle write one fight's
+            // stats onto a DIFFERENT fight's row — the right fighter and the right stat,
+            // but the wrong bout. Thin-coverage fighters are the exposure, because
+            // `candidates.length === 1` is exactly their situation: three placed legs were
+            // found frozen at a sigStr from another of that fighter's fights (Fernandes 23
+            // from his Nov 04 bout, Douglas 7 from a DWCS bout, Mederos 110 from UFC 316).
+            //
+            // So the rescue now requires the dates to agree when we know the target date.
+            // A missing date still falls through, because that was the original behaviour
+            // and tightening it further would silently stop legitimate settles.
             if (!targetRows.length && candidates.length === 1) {
-                targetRows = [candidates[0]];
+                const loneTs = Date.parse(candidates[0].date);
+                const datesKnown = Number.isFinite(targetDateTs) && Number.isFinite(loneTs);
+                if (!datesKnown || Math.abs(loneTs - targetDateTs) <= this.RESULT_MATCH_WINDOW_MS) {
+                    targetRows = [candidates[0]];
+                }
             }
             if (!targetRows.length)
                 return false;
