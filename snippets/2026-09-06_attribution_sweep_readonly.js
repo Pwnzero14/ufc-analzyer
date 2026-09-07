@@ -131,7 +131,19 @@
     if (!rec) { bump('no cache for fighter'); continue; }
 
     const hist = rec.fightHistory;
-    const own = hist.find((f) => f && ne(f.event) === ne(r.event));
+    // Match by event text OR date. Event strings are NOT comparable across
+    // sources: 'UFC Fight Night: Gilbert Burns vs Mike Malott' (platform row) and
+    // 'UFC Fight Night: Burns vs. Malott' (UFCStats cache) are the same card, and
+    // v1 of this sweep reported 735 of those as wrong-fight attribution. A fighter
+    // has at most one bout per date, so the date test is the reliable one.
+    const DATE_TOL_MS = 2 * 24 * 60 * 60 * 1000;
+    const rowTs = Date.parse(String(r.date ?? ''));
+    const own = hist.find((f) => {
+      if (!f) return false;
+      if (ne(f.event) === ne(r.event)) return true;
+      const fTs = Date.parse(String(f.date ?? ''));
+      return Number.isFinite(rowTs) && Number.isFinite(fTs) && Math.abs(fTs - rowTs) <= DATE_TOL_MS;
+    });
     if (own) {
       const correct = valueOf(own, pt);
       if (correct == null) { bump('cached fight lacks this stat'); continue; }
@@ -142,7 +154,7 @@
       continue;
     }
 
-    const evTs = Date.parse(r.date), fetched = Number(rec.fetchedAt);
+    const evTs = rowTs, fetched = Number(rec.fetchedAt);
     const cacheShouldHaveIt = Number.isFinite(evTs) && Number.isFinite(fetched) && fetched > evTs;
     if (!cacheShouldHaveIt) { bump('event not cached (cache predates it - benign)'); continue; }
     bump('event missing from a cache NEWER than the event');

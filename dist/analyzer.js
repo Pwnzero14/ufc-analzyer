@@ -26892,17 +26892,29 @@ async function healArchiveFromCache() {
         rowsAfter = archive.length;
         if (!rowsBefore)
             return archive;
+        // Indexed by fighter+propType ONLY, and matched by DATE below rather than by
+        // event text. Event strings are not comparable across sources: the same card
+        // is 'UFC Fight Night: Gilbert Burns vs Mike Malott' on a platform row and
+        // 'UFC Fight Night: Burns vs. Malott' in the UFCStats cache, and normalizeEvent
+        // is a bare lowercase/trim that cannot bridge them. Matching on event text
+        // silently skipped every platform-spelled row — the first version of this pass
+        // reported 1360 corrections while never looking at them.
+        //
+        // A fighter has at most one bout on a date, so fighter+propType+date is
+        // effectively a unique key, and far safer than the fuzzy event matching in
+        // updateResult that caused [[project_archive_wrong_fight_attribution]].
         const idx = new Map();
         for (const r of archive) {
             if (!r)
                 continue;
-            const k = `${nf(r.fighter)}|${ne(r.event)}|${String(normalizePropType(r.propType)).toLowerCase()}`;
+            const k = `${nf(r.fighter)}|${String(normalizePropType(r.propType)).toLowerCase()}`;
             const bucket = idx.get(k);
             if (bucket)
                 bucket.push(r);
             else
                 idx.set(k, [r]);
         }
+        const DATE_TOL_MS = 2 * 24 * 60 * 60 * 1000;
         for (const key of Object.keys(all)) {
             if (!/^ufcstats_v51_/.test(key))
                 continue;
@@ -26928,11 +26940,20 @@ async function healArchiveFromCache() {
                     [['ctrl', 'control'], f.ctrlSecs != null ? ctrlMinsOf(f.ctrlSecs) : null],
                     [['fighttime'], f.timeSecs != null ? parseFloat((Number(f.timeSecs) / 60).toFixed(2)) : null],
                 ];
+                const fightTs = Date.parse(String(f.date ?? ''));
                 for (const [propTypes, value] of targets) {
                     if (value == null || !Number.isFinite(Number(value)))
                         continue;
                     for (const pt of propTypes) {
-                        for (const row of idx.get(`${who}|${ev}|${pt}`) ?? []) {
+                        for (const row of idx.get(`${who}|${pt}`) ?? []) {
+                            // Same card by either test: the event strings happen to agree, or the
+                            // dates do. Rows with neither are left alone rather than guessed at.
+                            const rowTs = Date.parse(String(row.date ?? ''));
+                            const sameEvent = ne(row.event) === ev;
+                            const sameDate = Number.isFinite(fightTs) && Number.isFinite(rowTs)
+                                && Math.abs(rowTs - fightTs) <= DATE_TOL_MS;
+                            if (!sameEvent && !sameDate)
+                                continue;
                             // Only ever REWRITE an existing result. Rows with no result are the
                             // backfill's job (backfillUnresolvedFromKnownOutcomes); this pass is
                             // for values that are present but WRONG, which that one cannot see.
