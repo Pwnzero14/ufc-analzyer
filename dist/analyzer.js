@@ -26993,7 +26993,13 @@ async function healArchiveFromCache() {
 async function refetchFighters(names) {
     const out = [];
     for (const raw of names) {
-        const name = String(raw || '').trim();
+        // NORMALIZE FIRST. The cache key is built from the name as given, so a raw
+        // archive spelling lands on the wrong key: 'Mansur Abdul-Malik' keeps its
+        // hyphen and looks for ufcstats_v51_mansur_abdul-malik while the record
+        // lives under ..._mansur_abdul_malik. The first run of this helper reported
+        // ok:false / "fights before: 0" for a fighter who plainly had 6 cached
+        // fights, which is the tell.
+        const name = normalizeName(String(raw || '').trim()) || String(raw || '').trim();
         if (!name)
             continue;
         const key = `ufcstats_v51_${name.toLowerCase().replace(/\s+/g, '_')}`;
