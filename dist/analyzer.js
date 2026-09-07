@@ -26953,6 +26953,61 @@ async function healArchiveFromCache() {
     debugLog(`[repair] ${fighters} cached fighters · ${rowsChanged} rows corrected · ${rowsBefore} rows in, ${rowsAfter} out`);
     return { fighters, rowsChanged, rowsBefore, rowsAfter };
 }
+// ── MANUAL REFETCH (console) ───────────────────────────────────────────────
+// ⟳ Repair from Cache can only correct a row it can recompute, and it
+// recomputes from the LOCAL ufcstats cache. A fighter whose cache predates
+// their fight has no fight to recompute from, so the repair silently leaves
+// those rows alone — which is how four legs survived the 2026-09-06 pass with
+// caches stamped 2026-08-07/15, weeks before the cards they were graded on.
+//
+// Nothing refetches them on its own: fetchFromUFCStats is only ever called for
+// fighters on the CURRENT board (the same roster gate behind the settle-heal
+// orphan window), so a past-card fighter is unreachable no matter how stale
+// their cache is. Their TTL expired long ago; nobody asks.
+//
+//   window.refetchFighters(['Jalin Turner', 'Mackenzie Dern'])
+//
+// Then click ⟳ Repair from Cache. SEQUENTIAL on purpose — UFCStats serves a
+// proof-of-work challenge and parallel fetches make it worse, not faster.
+async function refetchFighters(names) {
+    const out = [];
+    for (const raw of names) {
+        const name = String(raw || '').trim();
+        if (!name)
+            continue;
+        const key = `ufcstats_v51_${name.toLowerCase().replace(/\s+/g, '_')}`;
+        const before = await storageGet([key]);
+        const prevAt = before[key]?.fetchedAt ?? null;
+        const prevN = Array.isArray(before[key]?.fightHistory) ? before[key].fightHistory.length : 0;
+        // Mark stale rather than delete, so a failed fetch leaves the old record as
+        // a fallback instead of a hole (the Jean Silva precedent).
+        if (before[key])
+            await storageSet({ [key]: { ...before[key], fetchedAt: 0 } });
+        let data = null;
+        try {
+            data = await fetchFromUFCStats(name);
+        }
+        catch (err) {
+            debugLog(`refetch failed: ${name} — ${err.message}`);
+        }
+        const after = await storageGet([key]);
+        const nowN = Array.isArray(after[key]?.fightHistory) ? after[key].fightHistory.length : 0;
+        out.push({
+            fighter: name,
+            ok: !!data,
+            'fights before': prevN,
+            'fights after': nowN,
+            gained: nowN - prevN,
+            'cached was': prevAt ? new Date(prevAt).toISOString().slice(0, 16) : null,
+            'cached now': after[key]?.fetchedAt ? new Date(after[key].fetchedAt).toISOString().slice(0, 16) : null,
+            latest: nowN ? after[key].fightHistory[0]?.event : null,
+        });
+    }
+    console.table(out);
+    console.log('Now click ⟳ Repair from Cache. A fighter with gained: 0 did NOT pick up the');
+    console.log('missing fight — check the name spelling against UFCStats before repairing.');
+}
+window.refetchFighters = refetchFighters;
 async function archivePerformanceForRosterFighter(name, ufcData, opts) {
     if (!ufcData?.fightHistory?.length)
         return;
