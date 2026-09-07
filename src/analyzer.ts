@@ -27413,6 +27413,76 @@ async function healArchiveFromCache(): Promise<{ fighters: number; rowsChanged: 
   return { fighters, rowsChanged, rowsBefore, rowsAfter };
 }
 
+// ── CLEAR ORPHAN RESULTS (console) ─────────────────────────────────────────
+// Clears `result` on rows for a card the fighter has no fight on record for.
+//
+// THIS EXISTS IN CODE, NOT AS A SNIPPET, BECAUSE THE SNIPPET COULD NOT WIN.
+// A console snippet writes prop_archive_v1 raw. The settle runs on page load and
+// read-modify-writes the same key under PropArchiveService's lock, so a raw
+// write that lands mid-settle is silently overwritten — both writes "succeed",
+// chrome.runtime.lastError is null, and the change just is not there afterwards.
+// That swallowed a relabel and then this clear before a post-write read-back
+// caught it. Going through mutate() takes the lock and cannot be clobbered.
+//
+//   window.clearOrphanResults([['Conor McGregor', '2026-06-14'], ...])
+//
+// Each target is RE-VERIFIED against the live cache first: if the fighter has
+// since gained a fight on that date, the row is SKIPPED. That guard matters —
+// the orphan population started at 249 rows and 238 of them were stale cache
+// that refetching fixed, including a whole card wrongly believed cancelled.
+async function clearOrphanResults(targets: Array<[string, string]>): Promise<void> {
+  if (!Array.isArray(targets) || !targets.length) { console.warn('clearOrphanResults: no targets'); return; }
+  const all = await storageGetAll<Record<string, any>>();
+  const nf = (v: unknown): string => (normalizeName(String(v ?? '')) || '').toLowerCase();
+  const TOL = 2 * 24 * 60 * 60 * 1000;
+  const caches = new Map<string, any>();
+  for (const [k, v] of Object.entries(all)) {
+    if (/^ufcstats_v51_/.test(k) && v?.name && Array.isArray(v.fightHistory)) caches.set(nf(v.name), v);
+  }
+  const want = targets.map(([n, d]) => [nf(n), String(d).slice(0, 10)] as const);
+
+  const report: Array<Record<string, unknown>> = [];
+  let cleared = 0, skipped = 0, before = 0, after = 0;
+  await PropArchiveService.mutate(async (archive: any[]) => {
+    before = archive.length;
+    for (const r of archive) {
+      if (!r || !Number.isFinite(Number(r.result))) continue;
+      const day = String(r.date ?? '').slice(0, 10);
+      if (!want.some(([n, d]) => d === day && n === nf(r.fighter))) continue;
+      const rec = caches.get(nf(r.fighter));
+      const rowTs = Date.parse(String(r.date ?? ''));
+      const has = !!rec && rec.fightHistory.some((f: any) => {
+        const ts = Date.parse(String(f?.date ?? ''));
+        return Number.isFinite(ts) && Number.isFinite(rowTs) && Math.abs(ts - rowTs) <= TOL;
+      });
+      if (has) {
+        skipped++;
+        report.push({ fighter: r.fighter, event: r.event, date: day, propType: r.propType,
+          action: 'SKIPPED — fighter now HAS a fight on this date' });
+        continue;
+      }
+      report.push({ fighter: r.fighter, event: r.event, date: day, propType: r.propType,
+        line: r.line ?? null, 'result cleared': r.result, platform: r.platform || '' });
+      delete r.result;
+      cleared++;
+    }
+    after = archive.length;
+    return archive;
+  });
+
+  console.table(report);
+  console.log(`[clear-orphans] cleared ${cleared} · skipped ${skipped} · rows ${before} -> ${after}`);
+  // Read back regardless: the whole reason this moved into code is that a write
+  // reporting success proved nothing.
+  const check = await storageGet<Record<string, any>>(['prop_archive_v1']);
+  const back: any[] = Array.isArray(check['prop_archive_v1']) ? check['prop_archive_v1'] : [];
+  const stillSet = back.filter((r) => r && Number.isFinite(Number(r.result))
+    && want.some(([n, d]) => d === String(r.date ?? '').slice(0, 10) && n === nf(r.fighter))).length;
+  if (stillSet) console.error(`[clear-orphans] WRITE DID NOT PERSIST — ${stillSet} target row(s) still carry a result.`);
+  else console.log(`[clear-orphans] VERIFIED clean. ${back.length} rows.`);
+}
+(window as unknown as { clearOrphanResults: typeof clearOrphanResults }).clearOrphanResults = clearOrphanResults;
+
 // ── MANUAL REFETCH (console) ───────────────────────────────────────────────
 // ⟳ Repair from Cache can only correct a row it can recompute, and it
 // recomputes from the LOCAL ufcstats cache. A fighter whose cache predates
