@@ -101,7 +101,30 @@
   console.log(`  kept as Donte: ${kept} · relabelled: ${relabelled} · collisions skipped: ${collided} · unknown: ${unknown}`);
   if (report.length) console.table(report);
   if (!relabelled) { console.log('%c  nothing to write.', 'color:#3fb950'); return; }
-  await new Promise((r) => chrome.storage.local.set({ prop_archive_v1: archive }, r));
-  console.log(`%c  WROTE ${relabelled} relabelled row(s). Row count unchanged at ${archive.length}.`, 'color:#3fb950;font-weight:bold');
+
+  // v1 of this snippet reported "WROTE 36" against a write that never landed.
+  // chrome.storage.local.set fires its callback whether or not the write
+  // succeeded, so a rejected write reads as success — the same trap recorded in
+  // [[project_storage_quota_silent_writes]]. Check lastError AND re-read.
+  const before = await new Promise((r) => chrome.storage.local.getBytesInUse(null, r)).catch(() => null);
+  const err = await new Promise((res) => chrome.storage.local.set({ prop_archive_v1: archive }, () => res(chrome.runtime.lastError || null)));
+  if (err) {
+    console.error('%c  WRITE REJECTED:', 'color:#f85149;font-weight:bold', err.message || err);
+    console.error('  Nothing changed. bytesInUse before the attempt:', before);
+    return;
+  }
+  // Trust nothing: read it back and count.
+  const check = await new Promise((r) => chrome.storage.local.get(['prop_archive_v1'], r));
+  const back = Array.isArray(check.prop_archive_v1) ? check.prop_archive_v1 : [];
+  const damonNow = back.filter((r) => r && nf(r.fighter) === nf('Damon Jackson')).length;
+  const donteNow = back.filter((r) => r && nf(r.fighter) === nf('Donte Johnson')).length;
+  console.log(`  post-write read-back: ${back.length} rows · Damon Jackson ${damonNow} · Donte Johnson ${donteNow}`);
+  if (damonNow < relabelled) {
+    console.error('%c  WRITE DID NOT PERSIST.', 'color:#f85149;font-weight:bold',
+      `expected >= ${relabelled} Damon Jackson rows, found ${damonNow}.`);
+    console.error('  bytesInUse before the attempt:', before, '— check storage quota.');
+    return;
+  }
+  console.log(`%c  VERIFIED: ${relabelled} row(s) relabelled and read back. Rows ${back.length}.`, 'color:#3fb950;font-weight:bold');
   console.log('  Re-run the attribution sweep; the Donte Johnson suspects should be gone.');
 })();
