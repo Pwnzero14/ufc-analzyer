@@ -33765,6 +33765,236 @@ body:has(#cardContainer > .parlay-lab) .fighter-header-row { display: none; }
   .tab-btn, .source-toggle, .search-input.search-wide { transition: none; }
   .header::after { animation: none; content: none; }
 }
+
+/* ══ GLOW-UP 363 · LEDGER READABILITY PASS ═══════════════════════════════════
+   Both ledgers are dense tables that get SCANNED, not read. Every level below
+   is about lowering the noise floor so the few rows that matter surface. No
+   grid track is restructured except L6 above — a dense-grid rewrite needs
+   visual verification first, per the lesson from the .fighter-main pass. */
+
+/* L1/L2 · THE DEAD AFFORDANCE.
+   Shipping stake tracking put a ＄ on all 198 placed legs and a "$ add" on all
+   58 slips — including months-settled ones that will never carry money. That is
+   198 pieces of furniture for a handful of real straight bets. Now invisible
+   until you hover the row that owns it, and on keyboard focus so it stays
+   reachable. Space is RESERVED (opacity, not display) so hovering does not
+   shift the text under the cursor. */
+.plc-money.empty, .plp-money.empty { opacity: 0; transition: opacity 0.12s ease; }
+.plg-leg:hover .plc-money.empty,
+.plp-parlay:hover .plp-money.empty { opacity: 0.5; }
+.plc-money.empty:focus-visible, .plp-money.empty:focus-visible { opacity: 1; outline: 1px solid var(--accent, #6ee7a8); }
+.plg-leg:hover .plc-money.empty:hover,
+.plp-parlay:hover .plp-money.empty:hover { opacity: 1; }
+
+/* L3 · NUMBERS THAT LINE UP.
+   LINE and ACTUAL are scanned as a column. Proportional digits make 44.5, 105.5
+   and 9.99 ragged; tabular figures put the decimal in the same place on every
+   row, which is the whole reason to have a column. */
+.plg-leg .bps-line, .plg-leg .plg-actual, .plp-leg .bps-line {
+  font-variant-numeric: tabular-nums;
+}
+.plg-leg .plg-actual { text-align: right; }
+
+/* L4 · the repeated word "actual" is gone from the markup (the header says it).
+   The unit that remains rides small so the number keeps the weight. */
+.plg-actual b { font-weight: 800; }
+.plg-actual { font-size: 10px; }
+
+/* L5 · THE FIGHT-STACK TAG.
+   "2 legs" competed with the result chips in the same weight while meaning
+   something entirely different — concentration, not outcome. Recede it to a
+   marginal note; it is context for the rows beneath, not a verdict. */
+.plg-fight-n {
+  font-style: normal;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+  color: var(--text3);
+}
+.plg-leg:hover .plg-fight-n { opacity: 0.9; }
+
+/* L7 · SLIP-HEAD ACTION CLUSTER.
+   Money, void and remove arrived at different times and sat at different sizes,
+   so the right edge of every card was ragged. One height, one gap, pinned right
+   — the head reads as [what it is] ......... [what you can do to it]. */
+.plp-head { align-items: center; }
+.plp-money, .plp-void, .plp-remove {
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+}
+.plp-void, .plp-remove { margin-left: 2px; }
+.plp-money { margin-left: auto; }
+
+/* L8 · OUTCOME OUTRANKS PENDING.
+   CASH, BUST, VOID and "0/4 SETTLED" were all one weight, so a settled card and
+   an unsettled one read the same at a glance. A result is a fact; pending is the
+   absence of one. */
+.plg-status.hit, .plg-status.miss { font-weight: 800; }
+.plg-status.pending {
+  font-weight: 600;
+  opacity: 0.6;
+  border-color: rgba(255,255,255,0.08);
+}
+.plp-parlay:hover .plg-status.pending { opacity: 0.85; }
+
+/* L9 · THE ROW YOU ARE ON.
+   198 near-identical rows and the hover tint was 0.03 alpha — losing your place
+   mid-scan was routine. Slightly stronger, plus a lit left edge that survives on
+   the fight-grouped rows which already own that border. */
+.plg-leg:hover { background: rgba(255,255,255,0.055); }
+.plg-leg { border-left: 2px solid transparent; padding-left: 6px; }
+.plg-leg:hover { border-left-color: color-mix(in srgb, var(--accent, #6ee7a8) 45%, transparent); }
+.plg-leg.in-group:hover { border-left-color: color-mix(in srgb, var(--accent, #6ee7a8) 70%, transparent); }
+
+/* L10 · CHIP BASELINE.
+   Book and stat chips sat at different heights, so a row of them looked
+   sprung. One height and centred content across both ledgers. */
+.plg-leg .plc-book-cell > *, .plp-book {
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  box-sizing: border-box;
+}
+
+
+/* ══ GLOW-UP 364 · THE LEDGER, REWORKED (15 levels) ══════════════════════════
+   363 shipped ten levels that never loaded: the block was appended past the
+   closing html tag, so the browser read it as text. Only the two in-place edits
+   (the "actual" word, the parlay track widths) took effect. THE LESSON: a clean
+   tsc build proves nothing about CSS — it is not compiled, only served, and a
+   stylesheet outside the document fails silently and completely.
+
+   Everything here is CSS. Not one grid track count changes, because a dense
+   grid rewrite needs visual verification before code and these two tables are
+   read by scanning 198 near-identical rows. */
+
+/* L2 · THE BET IS ONE THING, NOT THREE COLUMNS.
+   SIDE / LINE / STAT were three equally-spaced cells, so "OVER 44.5 SS" read as
+   three facts. It is one: the wager. Tightened into a cluster with the line
+   carrying the weight, the direction and stat orbiting it. */
+.plg-leg .bps-dir { letter-spacing: 0.02em; opacity: 0.85; }
+.plg-leg .bps-line { font-weight: 800; font-size: 11.5px; letter-spacing: -0.01em; }
+.plg-leg .bps-stat { opacity: 0.7; font-size: 8.5px; letter-spacing: 0.06em; }
+
+/* L3 · DIRECTION AS A GLYPH.
+   "OVER"/"UNDER" spent four to five characters saying something an arrow says
+   instantly, on every one of 198 rows. The word stays for meaning and screen
+   readers; the arrow does the scanning. */
+.plg-leg .bps-dir::before, .plp-leg .bps-dir::before {
+  font-size: 9px;
+  margin-right: 2px;
+  opacity: 0.9;
+}
+.plg-leg .bps-dir.ov::before, .plp-leg .bps-dir.ov::before { content: '▲'; }
+.plg-leg .bps-dir.un::before, .plp-leg .bps-dir.un::before { content: '▼'; }
+.plg-leg .bps-dir { font-size: 8.5px; }
+
+/* L4 · "WAITING" IS NOT "BROKEN".
+   An event with nothing settled renders three empty columns. Blank space reads
+   as a fault. Dim the whole settled half so the row visibly ENDS at the book,
+   and let the event header carry the pending state instead. */
+.plg-event.all-pending .plc-clv,
+.plg-event.all-pending .plc-actual,
+.plg-event.all-pending .plc-status { opacity: 0.25; }
+.plg-event.all-pending .plg-colhead .plc-clv,
+.plg-event.all-pending .plg-colhead .plc-actual,
+.plg-event.all-pending .plg-colhead .plc-status { opacity: 0.3; }
+
+/* L5 · A FIGHT STACK IS ONE POSITION.
+   Three legs on one fight are not three bets — one result moves all three. The
+   existing left border said so faintly; now the whole block is tinted and
+   rounded so it reads as a unit before you read a word of it. */
+.plg-leg.in-group {
+  background: linear-gradient(90deg, rgba(255,255,255,0.030), rgba(255,255,255,0.008) 45%, transparent);
+}
+.plg-leg.in-group.group-head { border-top-left-radius: 6px; }
+.plg-leg.in-group + :not(.in-group) { margin-top: 2px; }
+
+/* L6 · RHYTHM WITHOUT STRIPES.
+   Zebra on 198 rows is visual noise. A hairline between fights gives the eye a
+   place to rest without painting half the table a different colour. */
+.plg-leg.group-head { border-top: 1px solid rgba(255,255,255,0.05); padding-top: 5px; }
+.plg-leg:first-child, .plg-colhead + .plg-leg { border-top: none; }
+
+/* L7 · THE RESULT IS THE ANSWER — let it be read first.
+   ✓ HIT / ✗ MISS were full pills competing with every other chip. Tight, bold,
+   and lit, so the right-hand edge of the table can be scanned on its own. */
+.plg-leg .plg-status { padding: 0 5px; font-weight: 800; letter-spacing: 0.02em; }
+.plg-leg .plg-status.hit { box-shadow: inset 0 0 0 1px rgba(38,208,124,0.25); }
+.plg-leg .plg-status.miss { box-shadow: inset 0 0 0 1px rgba(255,91,120,0.25); }
+
+/* L8 · BOOK AS A MARK, NOT A BANNER.
+   Five books repeated 198 times. The name matters once you look; the colour is
+   what you actually scan by. Smaller text, the hue does the work. */
+.plg-leg .plc-book-cell > * {
+  font-size: 8.5px;
+  padding: 0 5px;
+  letter-spacing: 0.03em;
+}
+
+/* L9 · THE OPPONENT IS CONTEXT.
+   It sat at the same weight as the fighter you bet, which is the one thing on
+   the row you did NOT choose. Receded so the eye goes to your side of it. */
+.plg-leg .bps-vs { opacity: 0.5; font-size: 9.5px; }
+.plg-leg:hover .bps-vs { opacity: 0.8; }
+
+/* L10 · ENTRY → CLOSE, COMPACT.
+   The one cell that is genuinely two numbers and a delta. Monospaced so the
+   arrow lands in the same place and the deltas stack into a column. */
+.plg-leg .plc-clv { font-family: 'JetBrains Mono', monospace; font-size: 8.5px; }
+
+/* L11 · EVENT HEADER HIERARCHY.
+   Name, counts, concentration, money, record and strip were one flat row of
+   equals. The name is the thing you navigate by; everything else is metadata. */
+.plg-ev-name { font-weight: 800; letter-spacing: 0.04em; }
+.plg-ev-legs { opacity: 0.6; }
+.plg-ev-head > * + * { margin-left: 6px; }
+.plg-ev-head:hover .plg-ev-name { color: var(--text); }
+
+/* L12 · PARLAY LEGS ARE A LIST, NOT A TABLE.
+   Tighter line rhythm so a 7-leg slip reads as one block, and the shared-leg
+   ×n — which is the CONCENTRATION warning — finally looks like a warning. */
+.plp-leg { padding: 1px 0; }
+.plp-leg .bps-line { font-weight: 800; }
+.plp-shared {
+  font-style: normal;
+  font-weight: 800;
+  font-size: 8.5px;
+  color: #e3b341;
+  opacity: 0.9;
+}
+.plp-leg.is-shared { background: rgba(227,179,65,0.05); border-radius: 3px; }
+
+/* L13 · SLIP HEAD RHYTHM.
+   Left: what it is. Right: what you can do. One baseline, one gap. */
+.plp-head { gap: 5px; }
+.plp-title { font-weight: 800; letter-spacing: 0.05em; }
+.plp-parlay { padding: 5px 7px; border-radius: 7px; }
+.plp-parlay:hover { background: rgba(255,255,255,0.022); }
+
+/* L14 · ONE TYPE RAMP.
+   Sizes had drifted to nine values between the two ledgers. Three: the number
+   you read (11.5), the text you read (10), the label you glance at (8.5). */
+.plg-leg .plc-name { font-size: 10.5px; font-weight: 700; }
+.plp-leg { font-size: 10.5px; }
+.plg-colhead { font-size: 8.5px; letter-spacing: 0.08em; opacity: 0.5; }
+
+/* L15 · MOTION THAT DOES NOT REPLAY.
+   The staggered reveal re-ran on every filter switch, so flipping HITS/MISSES
+   cascaded 44 rows each time. Capped hard, and a real focus ring for the
+   controls that are now hover-revealed. */
+.plg-leg { animation-duration: 0.18s; }
+.plg-leg[style*="--plg-i"] { animation-delay: calc(min(var(--plg-i), 12) * 8ms); }
+.plc-money:focus-visible, .plp-money:focus-visible,
+.plp-void:focus-visible, .plp-remove:focus-visible {
+  outline: 2px solid var(--accent, #6ee7a8);
+  outline-offset: 1px;
+  opacity: 1;
+}
+
 </style>
 </head>
 <body>
@@ -34223,96 +34453,3 @@ body:has(#cardContainer > .parlay-lab) .fighter-header-row { display: none; }
 <script type="module" src="dist/analyzer.js"></script>
 </body>
 </html>
-
-/* ══ GLOW-UP 363 · LEDGER READABILITY PASS ═══════════════════════════════════
-   Both ledgers are dense tables that get SCANNED, not read. Every level below
-   is about lowering the noise floor so the few rows that matter surface. No
-   grid track is restructured except L6 above — a dense-grid rewrite needs
-   visual verification first, per the lesson from the .fighter-main pass. */
-
-/* L1/L2 · THE DEAD AFFORDANCE.
-   Shipping stake tracking put a ＄ on all 198 placed legs and a "$ add" on all
-   58 slips — including months-settled ones that will never carry money. That is
-   198 pieces of furniture for a handful of real straight bets. Now invisible
-   until you hover the row that owns it, and on keyboard focus so it stays
-   reachable. Space is RESERVED (opacity, not display) so hovering does not
-   shift the text under the cursor. */
-.plc-money.empty, .plp-money.empty { opacity: 0; transition: opacity 0.12s ease; }
-.plg-leg:hover .plc-money.empty,
-.plp-parlay:hover .plp-money.empty { opacity: 0.5; }
-.plc-money.empty:focus-visible, .plp-money.empty:focus-visible { opacity: 1; outline: 1px solid var(--accent, #6ee7a8); }
-.plg-leg:hover .plc-money.empty:hover,
-.plp-parlay:hover .plp-money.empty:hover { opacity: 1; }
-
-/* L3 · NUMBERS THAT LINE UP.
-   LINE and ACTUAL are scanned as a column. Proportional digits make 44.5, 105.5
-   and 9.99 ragged; tabular figures put the decimal in the same place on every
-   row, which is the whole reason to have a column. */
-.plg-leg .bps-line, .plg-leg .plg-actual, .plp-leg .bps-line {
-  font-variant-numeric: tabular-nums;
-}
-.plg-leg .plg-actual { text-align: right; }
-
-/* L4 · the repeated word "actual" is gone from the markup (the header says it).
-   The unit that remains rides small so the number keeps the weight. */
-.plg-actual b { font-weight: 800; }
-.plg-actual { font-size: 10px; }
-
-/* L5 · THE FIGHT-STACK TAG.
-   "2 legs" competed with the result chips in the same weight while meaning
-   something entirely different — concentration, not outcome. Recede it to a
-   marginal note; it is context for the rows beneath, not a verdict. */
-.plg-fight-n {
-  font-style: normal;
-  font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  opacity: 0.55;
-  color: var(--text3);
-}
-.plg-leg:hover .plg-fight-n { opacity: 0.9; }
-
-/* L7 · SLIP-HEAD ACTION CLUSTER.
-   Money, void and remove arrived at different times and sat at different sizes,
-   so the right edge of every card was ragged. One height, one gap, pinned right
-   — the head reads as [what it is] ......... [what you can do to it]. */
-.plp-head { align-items: center; }
-.plp-money, .plp-void, .plp-remove {
-  height: 17px;
-  display: inline-flex;
-  align-items: center;
-  box-sizing: border-box;
-}
-.plp-void, .plp-remove { margin-left: 2px; }
-.plp-money { margin-left: auto; }
-
-/* L8 · OUTCOME OUTRANKS PENDING.
-   CASH, BUST, VOID and "0/4 SETTLED" were all one weight, so a settled card and
-   an unsettled one read the same at a glance. A result is a fact; pending is the
-   absence of one. */
-.plg-status.hit, .plg-status.miss { font-weight: 800; }
-.plg-status.pending {
-  font-weight: 600;
-  opacity: 0.6;
-  border-color: rgba(255,255,255,0.08);
-}
-.plp-parlay:hover .plg-status.pending { opacity: 0.85; }
-
-/* L9 · THE ROW YOU ARE ON.
-   198 near-identical rows and the hover tint was 0.03 alpha — losing your place
-   mid-scan was routine. Slightly stronger, plus a lit left edge that survives on
-   the fight-grouped rows which already own that border. */
-.plg-leg:hover { background: rgba(255,255,255,0.055); }
-.plg-leg { border-left: 2px solid transparent; padding-left: 6px; }
-.plg-leg:hover { border-left-color: color-mix(in srgb, var(--accent, #6ee7a8) 45%, transparent); }
-.plg-leg.in-group:hover { border-left-color: color-mix(in srgb, var(--accent, #6ee7a8) 70%, transparent); }
-
-/* L10 · CHIP BASELINE.
-   Book and stat chips sat at different heights, so a row of them looked
-   sprung. One height and centred content across both ledgers. */
-.plg-leg .plc-book-cell > *, .plp-book {
-  display: inline-flex;
-  align-items: center;
-  height: 15px;
-  box-sizing: border-box;
-}

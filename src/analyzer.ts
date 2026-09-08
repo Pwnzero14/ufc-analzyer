@@ -17132,7 +17132,10 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
       const pendChip = pendN
         ? `<span class="plg-ev-record pend" title="${pendN} of ${e.legs.length} legs have no settled archive result yet">○ ${pendN}</span>`
         : '';
-      return `<div class="plg-event${collapsed ? ' ev-collapsed' : ''}" data-ledger="placed" data-evkey="${e.evKey.replace(/"/g, '&quot;')}">
+      // GLOW-UP 364 L4 — an event with nothing settled renders three empty
+      // columns (ENTRY→CLOSE / ACTUAL / RESULT) and reads as broken rather than
+      // as waiting. The class lets it say so.
+      return `<div class="plg-event${collapsed ? ' ev-collapsed' : ''}${evSettled === 0 ? ' all-pending' : ''}" data-ledger="placed" data-evkey="${e.evKey.replace(/"/g, '&quot;')}">
         <button type="button" class="plg-ev-head" aria-expanded="${collapsed ? 'false' : 'true'}">
           <span class="plg-ev-caret" aria-hidden="true">▾</span>
           <span class="plg-ev-name">${e.evKey}</span>
