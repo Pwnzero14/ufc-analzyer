@@ -17169,20 +17169,26 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
   // Placed slips (parlay_placed_v1) resolved leg-by-leg through the same
   // resolver; a slip CASHES only if every leg hits (partial pick'em payouts
   // are noted but not modeled here — this is the all-or-nothing view).
-  const parlayLedgerData = ((): { html: string; count: number; cashed: number; settled: number } => {
+  // GLOW-UP 361 — MONEY, alongside the cash rate.
+  // "12/58 cashed" answers how OFTEN slips land, which is a different question
+  // from whether they made money: 21% at 8x is a profit and 21% at 2.7x is a
+  // rout. The ledger only ever answered the first. `money` carries the second.
+  type LedgerMoney = { staked: number; returned: number; slips: number; skipped: number; projected: number; byBook: Map<string, { staked: number; returned: number; slips: number }> };
+  const parlayLedgerData = ((): { html: string; count: number; cashed: number; settled: number; money: LedgerMoney } => {
     const raw = result[STORAGE_PARLAY_PLACED_KEY];
     const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, PlacedParlay[]>) : {};
     const evs = Object.entries(all)
       .map(([evKey, list]) => ({ evKey, list: Array.isArray(list) ? list : [] }))
       .filter(e => e.list.length);
     if (!evs.length) {
-      return { html: '<div class="inline-empty-msg" style="font-size:10px">No placed parlays yet — build a slip in Parlay Lab and hit ● PLACE PARLAY</div>', count: 0, cashed: 0, settled: 0 };
+      return { html: '<div class="inline-empty-msg" style="font-size:10px">No placed parlays yet — build a slip in Parlay Lab and hit ● PLACE PARLAY</div>', count: 0, cashed: 0, settled: 0, money: { staked: 0, returned: 0, slips: 0, skipped: 0, projected: 0, byBook: new Map() } };
     }
     evs.sort((a, b) => Math.max(0, ...b.list.map(p => p.placedAt || 0)) - Math.max(0, ...a.list.map(p => p.placedAt || 0)));
     // GLOW-UP 350: same collapse contract as the placed ledger, keyed separately
     // so opening an event in one ledger does not open it in the other.
     applyLedgerCollapseDefaults('parlay', evs.map(e => e.evKey));
     let count = 0, cashed = 0, settledSlips = 0;
+    const money: LedgerMoney = { staked: 0, returned: 0, slips: 0, skipped: 0, projected: 0, byBook: new Map() };
     const html = evs.map(e => {
       const evDk = eventDedupeKey(e.evKey);
       let evStaked = 0, evNet = 0, evNetSlips = 0, evProjected = 0;
@@ -17273,6 +17279,21 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
           : (!anyPending ? (anyMiss ? -pStake : (pPayout != null ? pPayout - pStake : null)) : null);
         const plActual = pReturned != null;
         if (pStake != null) { evStaked += pStake; if (pPL != null) { evNet += pPL; evNetSlips++; if (!plActual) evProjected++; } }
+        // Ledger-wide money. A settled slip with a stake but NO way to know what
+        // came back — cashed, no `returned`, no `payout` — is SKIPPED, not counted
+        // at zero return. Counting it would invent a total loss on a winner.
+        if (pStake != null && !anyPending) {
+          const ret = pReturned != null ? pReturned : (anyMiss ? 0 : (pPayout != null ? pPayout : null));
+          if (ret == null) { money.skipped++; }
+          else {
+            money.staked += pStake; money.returned += ret; money.slips++;
+            if (pReturned == null) money.projected++;
+            const bk = String(p.legs[0]?.bookLabel || 'No book');
+            const b = money.byBook.get(bk) || { staked: 0, returned: 0, slips: 0 };
+            b.staked += pStake; b.returned += ret; b.slips++;
+            money.byBook.set(bk, b);
+          }
+        }
         const plTag = pPL == null ? ''
           : ` <i class="plp-pl ${pPL >= 0 ? 'pos' : 'neg'}${plActual ? '' : ' est'}" title="${plActual
               ? `Actual: the book returned $${fmtMoney(pReturned!)} on a $${fmtMoney(pStake!)} stake.`
@@ -17316,10 +17337,40 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         <div class="plg-ev-body"><div class="plg-ev-inner">${cards}</div></div>
       </div>`;
     }).join('');
-    return { html: ledgerShell('parlay', html), count, cashed, settled: settledSlips };
+    // ── GLOW-UP 361 · the money strip ───────────────────────────────────────
+    // Sits ABOVE the events because it answers the question the per-event chips
+    // cannot: across everything, did this make money. Rendered only when there is
+    // settled money to report — an empty strip of zeroes would imply the answer
+    // is "nothing" when the answer is "not measured yet".
+    const m = money;
+    const roi = m.staked > 0 ? ((m.returned - m.staked) / m.staked) * 100 : 0;
+    const net = m.returned - m.staked;
+    const cashRate = settledSlips ? (cashed / settledSlips) * 100 : 0;
+    const bookRows = [...m.byBook.entries()]
+      .sort((a, b) => (b[1].returned - b[1].staked) - (a[1].returned - a[1].staked))
+      .map(([bk, b]) => {
+        const bnet = b.returned - b.staked;
+        const broi = b.staked > 0 ? (bnet / b.staked) * 100 : 0;
+        return `<span class="plm-book" title="${b.slips} settled slip${b.slips === 1 ? '' : 's'} on ${bk} carrying a stake: $${fmtMoney(b.staked)} risked, $${fmtMoney(b.returned)} back.">${bk} <b class="${bnet >= 0 ? 'pos' : 'neg'}">${bnet >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(bnet))}</b> <i>${broi >= 0 ? '+' : '−'}${Math.abs(broi).toFixed(0)}%</i></span>`;
+      }).join('');
+    const caveats = [
+      m.projected ? `${m.projected} of the ${m.slips} settled slips use a PROJECTED return (TO WIN, assuming all-or-nothing) rather than a recorded one — record the actual return on those chips if the book paid a partial.` : '',
+      m.skipped ? `${m.skipped} settled slip${m.skipped === 1 ? '' : 's'} carried a stake but no way to know the return (cashed with no TO WIN and no recorded return), so ${m.skipped === 1 ? 'it is' : 'they are'} excluded entirely rather than counted as a loss.` : '',
+    ].filter(Boolean).join(' ');
+    const moneyStrip = m.slips > 0
+      ? `<div class="plm-strip">
+          <span class="plm-lead" title="Across every settled slip that carries a stake. Cash RATE and MONEY are different questions — a 21% cash rate is a profit at 8x and a rout at 2.7x — so both are shown.">MONEY</span>
+          <span class="plm-cell">${m.slips} settled · $${fmtMoney(m.staked)} risked</span>
+          <span class="plm-cell plm-net ${net >= 0 ? 'pos' : 'neg'}" title="$${fmtMoney(m.returned)} came back on $${fmtMoney(m.staked)} risked.${caveats ? ` ${caveats}` : ''}">${net >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(net))} · ${roi >= 0 ? '+' : '−'}${Math.abs(roi).toFixed(0)}% ROI</span>
+          <span class="plm-cell plm-vs" title="Cash rate counts slips; ROI counts dollars. They diverge when your winners and your big tickets are not the same slips — which is the thing a flat hit rate cannot show you.">vs ${cashRate.toFixed(0)}% cash rate</span>
+          ${bookRows}
+          ${caveats ? `<span class="plm-warn" title="${caveats}">⚠</span>` : ''}
+        </div>`
+      : '';
+    return { html: ledgerShell('parlay', moneyStrip + html), count, cashed, settled: settledSlips, money };
   })();
   const parlayLedgerSummary = parlayLedgerData.count
-    ? `<span style="font-size:10px;color:var(--text-muted)">${parlayLedgerData.count} parlay${parlayLedgerData.count === 1 ? '' : 's'} · ${parlayLedgerData.settled ? `${parlayLedgerData.cashed}/${parlayLedgerData.settled} cashed` : 'none settled yet'}</span>`
+    ? `<span style="font-size:10px;color:var(--text-muted)">${parlayLedgerData.count} parlay${parlayLedgerData.count === 1 ? '' : 's'} · ${parlayLedgerData.settled ? `${parlayLedgerData.cashed}/${parlayLedgerData.settled} cashed` : 'none settled yet'}${parlayLedgerData.money.slips ? ` · ${(() => { const mm = parlayLedgerData.money; const nn = mm.returned - mm.staked; return `<b style="color:${nn >= 0 ? '#6ee7a8' : '#ff8fa3'}">${nn >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(nn))}</b>`; })()}` : ''}</span>`
     : `<span style="font-size:10px;color:var(--text-muted)">no placed parlays yet</span>`;
 
   // ── Per-event breakdown ────────────────────────────────────────────────

@@ -28803,6 +28803,55 @@ body.bp-compact .best-pick-meta > * { flex: 0 0 auto; }
    all-or-nothing, which is the one assumption partial pick'em payouts break, so
    it must not read with the same authority as a recorded return. */
 .plp-pl.est { opacity: 0.62; font-weight: 700; }
+
+/* ── GLOW-UP 361 · money strip ────────────────────────────────────────────────
+   Sits above the events and answers what the per-event chips cannot: across
+   everything, did this make money. Deliberately reads as a summary BAR rather
+   than another chip row, because it is a different altitude from the per-slip
+   detail below it and should not compete with it. */
+.plm-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.025);
+  border: 1px solid rgba(255,255,255,0.07);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.plm-lead {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  color: var(--text3);
+}
+.plm-cell { color: var(--text2); }
+.plm-net { font-weight: 800; }
+.plm-net.pos { color: #6ee7a8; }
+.plm-net.neg { color: #ff8fa3; }
+/* The comparison is the point of the strip, so it is set apart rather than
+   sitting in the run of numbers. */
+.plm-vs {
+  color: var(--text3);
+  padding-left: 8px;
+  border-left: 1px solid rgba(255,255,255,0.10);
+}
+.plm-book {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: var(--text3);
+  font-size: 9.5px;
+}
+.plm-book b { font-weight: 800; }
+.plm-book b.pos, .plm-book i.pos { color: #6ee7a8; }
+.plm-book b.neg, .plm-book i.neg { color: #ff8fa3; }
+.plm-book i { font-style: normal; opacity: 0.7; margin-left: 2px; }
+.plm-warn { color: #e3b341; font-weight: 800; cursor: help; }
 .plp-pl.pos { color: #6ee7a8; }
 .plp-pl.neg { color: #ff8fa3; }
 
