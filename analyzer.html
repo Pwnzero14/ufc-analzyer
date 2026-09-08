@@ -33826,7 +33826,13 @@ body:has(#cardContainer > .parlay-lab) .fighter-header-row { display: none; }
   box-sizing: border-box;
 }
 .plp-void, .plp-remove { margin-left: 2px; }
-.plp-money { margin-left: auto; }
+/* NOT margin-left:auto on .plp-money. Line ~28725 already gives the STATUS chip
+   the auto margin, and a second auto margin in the same flex row does not push
+   harder — it SPLITS the free space between the two, stranding the status chip
+   mid-card with a hole either side. Shipped that way in GLOW-UP 364 and the
+   screenshots caught it. The status chip is the head of the right cluster; money,
+   void and remove follow it. */
+.plp-money { margin-left: 0; }
 
 /* L8 · OUTCOME OUTRANKS PENDING.
    CASH, BUST, VOID and "0/4 SETTLED" were all one weight, so a settled card and
