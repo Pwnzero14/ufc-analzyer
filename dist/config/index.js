@@ -238,8 +238,10 @@ export const NAME_ALIASES = {
     'Xiaonan Yan': 'Yan Xiaonan',
     // Same card, same shape: UD writes "CE Liu" (normalizes to "Ce Liu"), the card is
     // "Liu Ce". Also fixes his opponent string on Levi Rodrigues Jr's UD record.
+    // The self-mapping 'Liu Ce' -> 'Liu Ce' that used to sit beside this was
+    // removed 2026-09-08: it did nothing, and it made THIS entry look like a chain
+    // (its target was also a source key) in the alias audit.
     'Ce Liu': 'Liu Ce',
-    'Liu Ce': 'Liu Ce',
     // UFC 329: Pick6 lists her Chinese-order "Wang Cong" (family Wang) while
     // UD/PP/Betr use Western-order "Cong Wang" — the mismatch split her into a real
     // card + a ghost and broke opponent/moneyline resolution (Tracy Cortez's dog-FP
@@ -265,7 +267,6 @@ export const NAME_ALIASES = {
     // separately. *** See [[project_archive_wrong_fight_attribution]].
     'Myktybek Orolbai': 'Myktybek Orolbai Uulu',
     'Orolbai': 'Myktybek Orolbai Uulu',
-    'Kevin Vallejos': 'Kevin Vallejos',
     'Jose Miguel Delgado': 'Jose Delgado',
     'Jose M Delgado': 'Jose Delgado',
     'Patricio Freire': 'Patricio Pitbull',

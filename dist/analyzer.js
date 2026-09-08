@@ -27545,12 +27545,23 @@ async function auditAliases() {
             }
         }
         else if (!dc && S !== D) {
-            notes.push('TARGET NOT CACHED — cannot confirm the canonical spelling exists; may be a typo');
-            severity = Math.max(severity, 2);
+            // A missing cache is NOT evidence of a bad spelling — caches only exist for
+            // fighters recently fetched, so most correct aliases have none. Archive rows
+            // under the target ARE evidence the spelling is real. The first run of this
+            // audit raised 18 warnings on that basis and every one was a false alarm.
+            if ((archiveCount.get(D) || 0) > 0) {
+                notes.push(`target confirmed by ${archiveCount.get(D)} archive row(s); no cache, which just means not recently fetched`);
+            }
+            else {
+                notes.push('TARGET NOT CACHED AND ABSENT FROM THE ARCHIVE — nothing anywhere uses this spelling; likely a typo');
+                severity = Math.max(severity, 2);
+            }
         }
         const aSrc = archiveCount.get(S) || 0, aDst = archiveCount.get(D) || 0;
+        // An unused source is harmless — it is a spelling a book MIGHT emit. Noted at
+        // the lowest level rather than treated as a problem to fix.
         if (!sc && !aSrc && S !== D) {
-            notes.push('source never seen in cache or archive — possibly obsolete');
+            notes.push('source unused so far — harmless, it is a spelling a book might still emit');
             severity = Math.max(severity, 1);
         }
         rows.push({
