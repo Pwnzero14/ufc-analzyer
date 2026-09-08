@@ -28799,6 +28799,10 @@ body.bp-compact .best-pick-meta > * { flex: 0 0 auto; }
   background: rgba(255,255,255,0.07);
 }
 .plp-pl { font-style: normal; font-weight: 800; margin-left: 3px; }
+/* A PROJECTED P&L is dimmed and carries a ≈ in the markup. It assumes
+   all-or-nothing, which is the one assumption partial pick'em payouts break, so
+   it must not read with the same authority as a recorded return. */
+.plp-pl.est { opacity: 0.62; font-weight: 700; }
 .plp-pl.pos { color: #6ee7a8; }
 .plp-pl.neg { color: #ff8fa3; }
 

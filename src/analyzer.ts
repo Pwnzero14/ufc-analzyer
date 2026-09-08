@@ -523,6 +523,8 @@ interface BestPicksPlacedRecord extends BestPicksSlatePick {
   // blank is the correct state, not missing data. Straight bets carry both.
   stake?: number;
   payout?: number;
+  /** Actual money back INCLUDING stake — see PlacedParlay.returned. */
+  returned?: number;
   // GLOW-UP 174: settled outcome written back by the Placed Ledger once the
   // archive grades the leg — makes history permanent even after the archive
   // prunes the underlying rows. Absent while pending.
@@ -569,7 +571,15 @@ interface PlacedParlayLeg { fighter: string; opponent: string | null; dir: strin
 // 2.7x reads $405, not $255. So profit on a cash is (payout - stake) and a bust
 // is (-stake). Every tooltip in the ledger states that, because the alternative
 // reading is just as plausible and silently halves the P/L.
-interface PlacedParlay { id: string; placedAt: number; legs: PlacedParlayLeg[]; stake?: number; payout?: number; }
+// `returned` is the ACTUAL money back once the slip settles, INCLUDING the
+// stake: 0 on an outright loss, the stake back on a void or push, `payout` on a
+// clean cash, and something in between on a partial pick'em payout. When set it
+// OVERRIDES the projection — the projection assumes all-or-nothing, and this
+// app's own bust tooltip already warns that partial payouts may apply.
+// P&L is always (returned - stake); with no `returned` it falls back to the
+// projection, and the UI says which it is rather than passing an estimate off
+// as fact.
+interface PlacedParlay { id: string; placedAt: number; legs: PlacedParlayLeg[]; stake?: number; payout?: number; returned?: number; }
 /**
  * Set (or clear) a single placed LEG's stake and payout — for straight bets.
  *
@@ -577,7 +587,7 @@ interface PlacedParlay { id: string; placedAt: number; legs: PlacedParlayLeg[]; 
  * inside a parlay must stay blank, because the parlay already carries that money
  * and recording it here too would double-count it in the totals.
  */
-async function setPlacedLegMoney(evKey: string, legKey: string, stake: number | null, payout: number | null): Promise<boolean> {
+async function setPlacedLegMoney(evKey: string, legKey: string, stake: number | null, payout: number | null, returned?: number | null): Promise<boolean> {
   try {
     const payload = await storageGet<Record<string, unknown>>([STORAGE_BEST_PICKS_PLACED_KEY]);
     const raw = payload[STORAGE_BEST_PICKS_PLACED_KEY];
@@ -587,6 +597,7 @@ async function setPlacedLegMoney(evKey: string, legKey: string, stake: number | 
     const next: BestPicksPlacedRecord = { ...legs[legKey] };
     if (stake == null) delete next.stake; else next.stake = stake;
     if (payout == null) delete next.payout; else next.payout = payout;
+    if (returned !== undefined) { if (returned == null) delete next.returned; else next.returned = returned; }
     legs[legKey] = next;
     all[evKey] = legs;
     await storageSet({ [STORAGE_BEST_PICKS_PLACED_KEY]: all });
@@ -610,7 +621,7 @@ async function getPlacedParlay(evKey: string, id: string): Promise<PlacedParlay 
  * stake is excluded from staked/P&L entirely, whereas a $0 stake would drag a
  * realised return toward zero.
  */
-async function setPlacedParlayMoney(evKey: string, id: string, stake: number | null, payout: number | null): Promise<boolean> {
+async function setPlacedParlayMoney(evKey: string, id: string, stake: number | null, payout: number | null, returned?: number | null): Promise<boolean> {
   try {
     const payload = await storageGet<Record<string, unknown>>([STORAGE_PARLAY_PLACED_KEY]);
     const raw = payload[STORAGE_PARLAY_PLACED_KEY];
@@ -621,6 +632,10 @@ async function setPlacedParlayMoney(evKey: string, id: string, stake: number | n
     const next: PlacedParlay = { ...list[i] };
     if (stake == null) delete next.stake; else next.stake = stake;
     if (payout == null) delete next.payout; else next.payout = payout;
+    // undefined = the caller never asked (slip still pending); null = clear it.
+    // 0 is a REAL value here — an outright loss returns nothing — so this can
+    // never be a falsy test.
+    if (returned !== undefined) { if (returned == null) delete next.returned; else next.returned = returned; }
     list[i] = next;
     all[evKey] = list;
     await storageSet({ [STORAGE_PARLAY_PLACED_KEY]: all });
@@ -16475,7 +16490,7 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
   // event), live-joined against the archive: ✓ HIT / ✗ MISS with the actual
   // number once the prop settles, ○ PENDING until then. Read-only join —
   // persistence of outcomes is level 3's job.
-  type PlacedLedgerRec = { name: string; pretty: string; dir: string; source: string; statLabel: string; line: number | null; book: string | null; bookLabel: string; opponent: string | null; placedAt: number; outcome?: 'hit' | 'miss'; actual?: number | null; resolvedAt?: number; stake?: number; payout?: number };
+  type PlacedLedgerRec = { name: string; pretty: string; dir: string; source: string; statLabel: string; line: number | null; book: string | null; bookLabel: string; opponent: string | null; placedAt: number; outcome?: 'hit' | 'miss'; actual?: number | null; resolvedAt?: number; stake?: number; payout?: number; returned?: number };
   type PlacedOutcomeUpdate = { evKey: string; legKey: string; outcome: 'hit' | 'miss'; actual: number | null };
   // Placed source key → archive PropType candidates. FP is book-aware:
   // PrizePicks scores differently, so it archives as Fantasy_PP. Hoisted to
@@ -17042,14 +17057,16 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         // their own, and a row of empty ＄ affordances would bury the real ones.
         const lStake = Number.isFinite(Number(r.stake)) ? Number(r.stake) : null;
         const lPayout = Number.isFinite(Number(r.payout)) ? Number(r.payout) : null;
-        const lPL = (lStake != null && l.outcome !== 'pending')
-          ? (l.outcome === 'miss' ? -lStake : (lPayout != null ? lPayout - lStake : null))
-          : null;
+        const lReturned = Number.isFinite(Number(r.returned)) ? Number(r.returned) : null;
+        const lPL = lStake == null ? null
+          : lReturned != null ? lReturned - lStake
+          : (l.outcome !== 'pending' ? (l.outcome === 'miss' ? -lStake : (lPayout != null ? lPayout - lStake : null)) : null);
+        const lActual = lReturned != null;
         if (lStake != null) { evLegStaked += lStake; if (lPL != null) { evLegNet += lPL; } }
         const escM = (x: string): string => String(x).replace(/"/g, '&quot;');
         const legMoney = lStake == null
-          ? `<button class="plc-money empty" data-plcm-ev="${escM(e.evKey)}" data-plcm-key="${escM(l.legKey)}" title="No stake on this leg. Leave it blank if the leg rides inside a parlay — the parlay carries the money. Click to record a stake if you bet this one straight.">＄</button>`
-          : `<button class="plc-money" data-plcm-ev="${escM(e.evKey)}" data-plcm-key="${escM(l.legKey)}" title="Straight bet: risked $${fmtMoney(lStake)}${lPayout != null ? `, TO WIN $${fmtMoney(lPayout)} total return (profit $${fmtMoney(lPayout - lStake)})` : ' — no TO WIN recorded'}. Click to edit.">$${fmtMoney(lStake)}${lPL != null ? ` <i class="plp-pl ${lPL >= 0 ? 'pos' : 'neg'}">${lPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(lPL))}</i>` : ''}</button>`;
+          ? `<button class="plc-money empty" data-plcm-ev="${escM(e.evKey)}" data-plcm-key="${escM(l.legKey)}" data-plcm-settled="${l.outcome === 'pending' ? '' : '1'}" title="No stake on this leg. Leave it blank if the leg rides inside a parlay — the parlay carries the money. Click to record a stake if you bet this one straight.">＄</button>`
+          : `<button class="plc-money" data-plcm-ev="${escM(e.evKey)}" data-plcm-key="${escM(l.legKey)}" data-plcm-settled="${l.outcome === 'pending' ? '' : '1'}" title="Straight bet: risked $${fmtMoney(lStake)}${lPayout != null ? `, TO WIN $${fmtMoney(lPayout)} total return` : ' — no TO WIN recorded'}.${lActual ? ` The book actually returned $${fmtMoney(lReturned!)}.` : lPL != null ? ' P&L below is PROJECTED from TO WIN and assumes all-or-nothing — record the actual return if it paid a partial.' : ''} Click to edit.">$${fmtMoney(lStake)}${lPL != null ? ` <i class="plp-pl ${lPL >= 0 ? 'pos' : 'neg'}${lActual ? '' : ' est'}">${lActual ? '' : '≈'}${lPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(lPL))}</i>` : ''}</button>`;
         const searchKey = ledgerSearchKey(`${r.name} ${r.opponent || ''}`);
         return `<div class="plg-leg${nFight > 1 ? ' in-group' : ''}${isGroupHead ? ' group-head' : ''}" data-outcome="${l.outcome}" data-name="${searchKey}" style="--plg-i:${Math.min(rowI, 28)}">
           <span class="plc-name">${r.pretty}${legMoney}</span>
@@ -17168,7 +17185,7 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
     let count = 0, cashed = 0, settledSlips = 0;
     const html = evs.map(e => {
       const evDk = eventDedupeKey(e.evKey);
-      let evStaked = 0, evNet = 0, evNetSlips = 0;
+      let evStaked = 0, evNet = 0, evNetSlips = 0, evProjected = 0;
       // ── GLOW-UP 305/306 · slips are not independent, and the ledger said nothing
       // Two facts live ACROSS slips, so no per-slip renderer could ever surface
       // them, and this ledger only ever rendered one slip at a time:
@@ -17247,13 +17264,20 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         // until the slip actually settles; a pending slip shows the wager only.
         const pStake = Number.isFinite(Number(p.stake)) ? Number(p.stake) : null;
         const pPayout = Number.isFinite(Number(p.payout)) ? Number(p.payout) : null;
-        const pPL = (pStake != null && !anyPending)
-          ? (anyMiss ? -pStake : (pPayout != null ? pPayout - pStake : null))
-          : null;
-        if (pStake != null) { evStaked += pStake; if (pPL != null) { evNet += pPL; evNetSlips++; } }
+        // A RECORDED return always wins. The fallback is a PROJECTION that assumes
+        // all-or-nothing, which is exactly the assumption partial pick'em payouts
+        // break, so it is marked with ≈ and never silently presented as fact.
+        const pReturned = Number.isFinite(Number(p.returned)) ? Number(p.returned) : null;
+        const pPL = pStake == null ? null
+          : pReturned != null ? pReturned - pStake
+          : (!anyPending ? (anyMiss ? -pStake : (pPayout != null ? pPayout - pStake : null)) : null);
+        const plActual = pReturned != null;
+        if (pStake != null) { evStaked += pStake; if (pPL != null) { evNet += pPL; evNetSlips++; if (!plActual) evProjected++; } }
         const plTag = pPL == null ? ''
-          : ` <i class="plp-pl ${pPL >= 0 ? 'pos' : 'neg'}">${pPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(pPL))}</i>`;
-        const moneyChip = `<button class="plp-money${pStake == null ? ' empty' : ''}" data-plp-money-ev="${esc(e.evKey)}" data-plp-money-id="${esc(String(p.id))}" title="${pStake == null
+          : ` <i class="plp-pl ${pPL >= 0 ? 'pos' : 'neg'}${plActual ? '' : ' est'}" title="${plActual
+              ? `Actual: the book returned $${fmtMoney(pReturned!)} on a $${fmtMoney(pStake!)} stake.`
+              : `PROJECTED from the TO WIN figure, assuming all-or-nothing. If this book pays anything on a partial hit, the real number is higher — click the chip to record what actually came back.`}">${plActual ? '' : '≈'}${pPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(pPL))}</i>`;
+        const moneyChip = `<button class="plp-money${pStake == null ? ' empty' : ''}" data-plp-money-ev="${esc(e.evKey)}" data-plp-money-id="${esc(String(p.id))}" data-plp-settled="${anyPending ? '' : '1'}" title="${pStake == null
           ? 'No stake recorded for this slip — click to add what you risked and the TO WIN total. Leave blank for slips you are not tracking in money.'
           : `Risked $${fmtMoney(pStake)}${pPayout != null ? `, TO WIN $${fmtMoney(pPayout)} (the book's TOTAL RETURN, so profit on a cash is $${fmtMoney(pPayout - pStake)})` : ' — no TO WIN recorded, so profit cannot be computed'}. Click to edit.`}">${pStake == null ? '＄ add' : `$${fmtMoney(pStake)}${pPayout != null ? ` → $${fmtMoney(pPayout)}` : ''}`}${plTag}</button>`;
         const removeBtn = `<button class="plp-remove" data-plp-ev="${esc(e.evKey)}" data-plp-id="${esc(String(p.id))}" data-plp-sum="${esc(legSummary)}" title="Remove this parlay from the ledger — use when the book voided it (a fight falling off the card) or it was placed by mistake. Re-place from Parlay Lab if needed.">✕</button>`;
@@ -17280,7 +17304,7 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         ? `<span class="plg-ev-record ${evCashed * 3 >= evSettledSlips ? 'good' : 'bad'}" title="${evCashed} of ${evSettledSlips} settled slips cashed on this card">CASHED ${evCashed}/${evSettledSlips}</span>`
         : `<span class="plg-ev-record">all pending</span>`;
       const evMoney = evStaked > 0
-        ? `<span class="plg-ev-money${evNetSlips ? (evNet >= 0 ? ' pos' : ' neg') : ''}" title="$${fmtMoney(evStaked)} staked across the slips on this card that carry a stake.${evNetSlips ? ` ${evNetSlips} of them have settled, for a realised ${evNet >= 0 ? 'profit' : 'loss'} of $${fmtMoney(Math.abs(evNet))}. Slips with no TO WIN recorded are counted at stake only when they bust and are skipped when they cash, so this understates a win rather than inventing one.` : ' None have settled yet.'}">$${fmtMoney(evStaked)}${evNetSlips ? ` · ${evNet >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(evNet))}` : ''}</span>`
+        ? `<span class="plg-ev-money${evNetSlips ? (evNet >= 0 ? ' pos' : ' neg') : ''}" title="$${fmtMoney(evStaked)} staked across the slips on this card that carry a stake.${evNetSlips ? ` ${evNetSlips} of them have settled, for a ${evNet >= 0 ? 'profit' : 'loss'} of $${fmtMoney(Math.abs(evNet))}.${evProjected ? ` ${evProjected} of those ${evProjected === 1 ? 'is a PROJECTION' : 'are PROJECTIONS'} from the TO WIN figure rather than a recorded return, so this assumes all-or-nothing and will be wrong for any slip that paid on a partial hit — record the actual return on those chips.` : ' All figures are recorded actuals.'} Slips with no TO WIN recorded are counted at stake only when they bust and skipped when they cash, so this understates a win rather than inventing one.` : ' None have settled yet.'}">$${fmtMoney(evStaked)}${evNetSlips ? ` · ${evNet >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(evNet))}` : ''}</span>`
         : '';
       return `<div class="plg-event${collapsed ? ' ev-collapsed' : ''}" data-ledger="parlay" data-evkey="${e.evKey.replace(/"/g, '&quot;')}">
         <button type="button" class="plg-ev-head" aria-expanded="${collapsed ? 'false' : 'true'}">
@@ -18772,6 +18796,18 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         return Number.isFinite(v) && v > 0 ? v : null;
       };
       const stake = parseOrNull(sIn), payout = parseOrNull(pIn);
+      // Only asked once the slip has settled — there is nothing to record while
+      // it is live, and a third prompt on every edit is noise.
+      // ZERO IS A REAL ANSWER here (an outright loss returns nothing), so this
+      // parser must not treat 0 as blank the way the stake one does.
+      let returned: number | null | undefined;
+      if (btn.dataset.plpSettled === '1') {
+        const proj = stake != null ? (payout != null ? payout : stake) : null;
+        const rIn = prompt('RETURNED — the money the book actually paid back, INCLUDING your stake. 0 if it lost outright, your stake back on a void or push, and whatever the partial paid if it paid one. Blank to fall back to the projection.', cur.returned != null ? String(cur.returned) : (proj != null ? '' : ''));
+        if (rIn === null) return;
+        const t = String(rIn).replace(/[$,\s]/g, '');
+        returned = t === '' ? null : (Number.isFinite(parseFloat(t)) && parseFloat(t) >= 0 ? parseFloat(t) : null);
+      }
       if (payout != null && stake != null && payout < stake) {
         if (!confirm(`TO WIN ($${payout}) is less than the stake ($${stake}).
 
@@ -18779,8 +18815,12 @@ That is a losing price. If you meant the PROFIT rather than the total return, ca
 
 Save anyway?`)) return;
       }
-      const ok = await setPlacedParlayMoney(evKey, id, stake, payout);
-      showToast(ok ? (stake == null ? '✓ Stake cleared' : `✓ $${fmtMoney(stake)}${payout != null ? ` → $${fmtMoney(payout)}` : ''} saved`) : 'Could not save');
+      const ok = await setPlacedParlayMoney(evKey, id, stake, payout, returned);
+      showToast(ok
+        ? (stake == null ? '✓ Stake cleared'
+          : returned != null ? `✓ $${fmtMoney(stake)} → returned $${fmtMoney(returned)} (${returned - stake >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(returned - stake))})`
+          : `✓ $${fmtMoney(stake)}${payout != null ? ` → $${fmtMoney(payout)}` : ''} saved`)
+        : 'Could not save');
       if (ok) void renderArchivePanel(container);
     });
   });
@@ -18805,7 +18845,14 @@ Save anyway?`)) return;
         return Number.isFinite(v) && v > 0 ? v : null;
       };
       const stake = parseOrNull(sIn), payout = parseOrNull(pIn);
-      const ok = await setPlacedLegMoney(evKey, legKey, stake, payout);
+      let returned: number | null | undefined;
+      if (btn.dataset.plcmSettled === '1') {
+        const rIn = prompt('RETURNED — money actually paid back, INCLUDING your stake. 0 if it lost. Blank to fall back to the projection.', cur.returned != null ? String(cur.returned) : '');
+        if (rIn === null) return;
+        const t = String(rIn).replace(/[$,\s]/g, '');
+        returned = t === '' ? null : (Number.isFinite(parseFloat(t)) && parseFloat(t) >= 0 ? parseFloat(t) : null);
+      }
+      const ok = await setPlacedLegMoney(evKey, legKey, stake, payout, returned);
       showToast(ok ? (stake == null ? '✓ Stake cleared' : `✓ $${fmtMoney(stake)}${payout != null ? ` → $${fmtMoney(payout)}` : ''} saved`) : 'Could not save');
       if (ok) void renderArchivePanel(container);
     });
