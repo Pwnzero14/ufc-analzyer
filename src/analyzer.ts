@@ -27413,6 +27413,68 @@ async function healArchiveFromCache(): Promise<{ fighters: number; rowsChanged: 
   return { fighters, rowsChanged, rowsBefore, rowsAfter };
 }
 
+// ── FIX OPENING LINES (console) ────────────────────────────────────────────
+// Corrects a stored OPENING line that was anchored after the line had already
+// moved. Fetching late stores the POST-move value as the open, so the movement
+// becomes invisible — stored open == current line, and the fighter never shows
+// as a mover. The Discord alert history is the only independent record of what
+// the opener actually was.
+//
+//   window.fixOpeningLines([['jean silva', 43.5], ['tommy mcmillen', 53.5]])
+//   window.fixOpeningLines([...], 'ud', 'ss')      // platform/stat default p6/ss
+//
+// *** ONLY CORRECTS KEYS THAT ALREADY EXIST. *** A baseline that does not exist
+// is not created: inventing one manufactures line movement that never happened,
+// which is worse than having no baseline at all.
+//
+// Goes through _openingLines + persistOpeningLines rather than writing
+// lines_open_v1 raw, for two reasons learned the hard way today: the page holds
+// the baselines in memory and a later snapshot would rewrite storage from that
+// stale Map, and a raw write can race the page's own writer and vanish with no
+// error. persistOpeningLines also preserves eventKey / betrSeedHash /
+// forBetrEventDate / capturedAt, which a hand-built record would drop.
+async function fixOpeningLines(pairs: Array<[string, number]>, platform = 'p6', stat = 'ss'): Promise<void> {
+  if (!Array.isArray(pairs) || !pairs.length) { console.warn('fixOpeningLines: no pairs'); return; }
+  const report: Array<Record<string, unknown>> = [];
+  let changed = 0;
+  for (const [rawName, value] of pairs) {
+    const key = openingLineKey(platform, stat, String(rawName));
+    if (!_openingLines.has(key)) {
+      report.push({ key, action: 'NO SUCH BASELINE — not created, investigate the name' });
+      continue;
+    }
+    const before = _openingLines.get(key);
+    if (Number(before) === Number(value)) {
+      report.push({ key, from: before, to: value, action: 'already correct' });
+      continue;
+    }
+    _openingLines.set(key, Number(value));
+    report.push({ key, from: before, to: Number(value), action: 'corrected' });
+    changed++;
+  }
+  console.table(report);
+  if (!changed) { console.log('[fix-openers] nothing to write.'); return; }
+
+  await persistOpeningLines();
+
+  // Read back: a write reporting success proves nothing.
+  const back = await storageGet<Record<string, any>>(['lines_open_v1']);
+  const lines = back['lines_open_v1']?.lines || {};
+  let wrong = 0;
+  for (const [rawName, value] of pairs) {
+    const key = openingLineKey(platform, stat, String(rawName));
+    if (!(key in lines)) continue;
+    if (Number(lines[key]) !== Number(value)) { wrong++; console.error(`  [fix-openers] ${key} is ${lines[key]}, expected ${value}`); }
+  }
+  if (wrong) console.error(`[fix-openers] WRITE DID NOT PERSIST for ${wrong} key(s).`);
+  else console.log(`[fix-openers] VERIFIED: ${changed} opener(s) corrected and read back. ${Object.keys(lines).length} baselines total.`);
+  console.log('[fix-openers] NOTE: line_history_v1 is untouched. Its earliest point may still');
+  console.log('  hold the post-move value, which only matters if the baselines are ever wiped');
+  console.log('  and reconstructed from history.');
+  try { renderFighters(); } catch { /* board may not be mounted */ }
+}
+(window as unknown as { fixOpeningLines: typeof fixOpeningLines }).fixOpeningLines = fixOpeningLines;
+
 // ── CLEAR ORPHAN RESULTS (console) ─────────────────────────────────────────
 // Clears `result` on rows for a card the fighter has no fight on record for.
 //
