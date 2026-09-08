@@ -17032,7 +17032,10 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
               : ` title="The archive disagrees with this settled value: shown ${l.actual}${unit}, archive ${Math.round(l.drift.freshActual * 10) / 10}${unit} (${l.drift.storedActual != null && l.drift.freshActual > l.drift.storedActual ? '+' : ''}${l.drift.storedActual != null ? Math.round((l.drift.freshActual - l.drift.storedActual) * 10) / 10 : '?'}). Your ${r.dir} grades ${String(l.outcome).toUpperCase()} on either number, so the verdict is unaffected. NEITHER side is automatically trusted: recomputing from UFCStats components put the archive RIGHT on the SS drifts and WRONG on the FP ones, and 81 archive Fantasy rows disagree with computed FP for reasons not yet understood."`)
           : '';
         const actualHtml = l.actual != null
-          ? `<span class="plg-actual${driftCls}"${driftTitle}>actual <b>${Math.round(l.actual * 10) / 10}${unit}</b></span>`
+          // GLOW-UP 363 L4 — the word "actual" was repeated on all 198 rows while
+          // the column header already says ACTUAL. Removing it is not decoration:
+          // it lets the number sit in a tabular column that can be scanned down.
+          ? `<span class="plg-actual${driftCls}"${driftTitle}><b>${Math.round(l.actual * 10) / 10}</b>${unit}</span>`
           : '';
         // ── GLOW-UP 311 · YOUR entry against the close, on the row ─────────────
         // The CLV panel above this reads ai_lean_snapshots — the BOARD's lines. On
