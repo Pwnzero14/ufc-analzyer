@@ -384,6 +384,35 @@ async function setPlacedLegMoney(evKey, legKey, stake, payout, returned) {
         return false;
     }
 }
+/** Mark a slip voided by the book, or un-void it. Reason is free text and optional. */
+async function setPlacedParlayVoid(evKey, id, voided, reason) {
+    try {
+        const payload = await storageGet([STORAGE_PARLAY_PLACED_KEY]);
+        const raw = payload[STORAGE_PARLAY_PLACED_KEY];
+        const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw } : {};
+        const list = Array.isArray(all[evKey]) ? [...all[evKey]] : [];
+        const i = list.findIndex(p => String(p.id) === String(id));
+        if (i < 0)
+            return false;
+        const next = { ...list[i] };
+        if (voided) {
+            next.voidedAt = Date.now();
+            if (reason)
+                next.voidReason = reason;
+        }
+        else {
+            delete next.voidedAt;
+            delete next.voidReason;
+        }
+        list[i] = next;
+        all[evKey] = list;
+        await storageSet({ [STORAGE_PARLAY_PLACED_KEY]: all });
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
 /** Read one placed parlay by event + id. */
 async function getPlacedParlay(evKey, id) {
     const payload = await storageGet([STORAGE_PARLAY_PLACED_KEY]);
@@ -16845,7 +16874,10 @@ async function renderArchivePanel(container) {
             //
             // Both are computed once per event, before any card renders.
             const legKeyOf = (l) => `${String(l.fighter || '').toLowerCase()}|${l.dir}|${l.line}|${l.stat}`;
-            const slipSets = e.list.map(p => new Set((p.legs || []).map(legKeyOf)));
+            // A voided slip is not exposure. Leaving it in would report "⊃ HOLDS 1"
+            // pointing at a wager that never ran, and inflate the ×n shared-leg counts
+            // that exist to show concentration. Empty set = invisible to both.
+            const slipSets = e.list.map(p => p.voidedAt ? new Set() : new Set((p.legs || []).map(legKeyOf)));
             const legSlipCount = new Map();
             for (const set of slipSets)
                 for (const k of set)
@@ -16878,22 +16910,30 @@ async function renderArchivePanel(container) {
                 const hitN = legs.filter(x => x.outcome === 'hit').length;
                 const anyPending = legs.some(x => x.outcome === 'pending');
                 const anyMiss = legs.some(x => x.outcome === 'miss');
-                if (!anyPending) {
-                    settledSlips++;
-                    if (!anyMiss)
-                        cashed++;
+                const isVoid = !!p.voidedAt;
+                // A void has no outcome. It is not a pending bet, not a win and not a
+                // loss, so it must not reach the cash record or the outcome strip — the
+                // whole reason this state exists rather than deleting the slip.
+                if (!isVoid) {
+                    if (!anyPending) {
+                        settledSlips++;
+                        if (!anyMiss)
+                            cashed++;
+                    }
+                    slipOutcomes.push(anyPending ? 'pending' : anyMiss ? 'miss' : 'hit');
                 }
-                slipOutcomes.push(anyPending ? 'pending' : anyMiss ? 'miss' : 'hit');
-                const statusChip = anyPending
-                    ? `<span class="plg-status pending" title="${legs.length - settledN} leg(s) not settled yet">○ ${settledN}/${legs.length} SETTLED</span>`
-                    : anyMiss
-                        // GLOW-UP 307: a slip one leg from cashing and a slip that missed
-                        // everything both read "✗ BUST" in the same weight. The near miss is the
-                        // more informative outcome of the two — it says the read was right and the
-                        // slip was too long — so it now says so and is toned back from the full
-                        // bust rather than shouting equally.
-                        ? `<span class="plg-status miss${legs.length - hitN === 1 ? ' near' : ''}" title="${legs.length - hitN} leg(s) missed — the full slip busts (in-app partial pick'em payouts may still apply).${legs.length - hitN === 1 ? ` ONE leg away: ${hitN} of ${legs.length} landed. The read was right and the slip was one leg too long — worth checking whether that leg was the one you were least sure of.` : ''}">✗ BUST ${hitN}/${legs.length}${legs.length - hitN === 1 ? ' <i>1 away</i>' : ''}</span>`
-                        : `<span class="plg-status hit" title="All ${legs.length} legs hit — slip cashes">✓ CASH ${hitN}/${legs.length}</span>`;
+                const statusChip = isVoid
+                    ? `<span class="plg-status void" title="Voided by the book${p.voidReason ? ` — ${String(p.voidReason).replace(/"/g, '&quot;')}` : ''}. Kept in the ledger because you did place it, but excluded from the cash record, the money totals and the concentration analysis: a bet that never ran has no outcome. Click ⊘ again to un-void.">⊘ VOID</span>`
+                    : anyPending
+                        ? `<span class="plg-status pending" title="${legs.length - settledN} leg(s) not settled yet">○ ${settledN}/${legs.length} SETTLED</span>`
+                        : anyMiss
+                            // GLOW-UP 307: a slip one leg from cashing and a slip that missed
+                            // everything both read "✗ BUST" in the same weight. The near miss is the
+                            // more informative outcome of the two — it says the read was right and the
+                            // slip was too long — so it now says so and is toned back from the full
+                            // bust rather than shouting equally.
+                            ? `<span class="plg-status miss${legs.length - hitN === 1 ? ' near' : ''}" title="${legs.length - hitN} leg(s) missed — the full slip busts (in-app partial pick'em payouts may still apply).${legs.length - hitN === 1 ? ` ONE leg away: ${hitN} of ${legs.length} landed. The read was right and the slip was one leg too long — worth checking whether that leg was the one you were least sure of.` : ''}">✗ BUST ${hitN}/${legs.length}${legs.length - hitN === 1 ? ' <i>1 away</i>' : ''}</span>`
+                            : `<span class="plg-status hit" title="All ${legs.length} legs hit — slip cashes">✓ CASH ${hitN}/${legs.length}</span>`;
                 const legRows = legs.map(x => {
                     const st = x.outcome === 'hit' ? '<span class="plp-mini hit">✓</span>' : x.outcome === 'miss' ? '<span class="plp-mini miss">✗</span>' : '<span class="plp-mini pending">○</span>';
                     // GLOW-UP 306: this exact leg also carries other slips. Marked ON the leg
@@ -16925,7 +16965,7 @@ async function renderArchivePanel(container) {
                     : pReturned != null ? pReturned - pStake
                         : (!anyPending ? (anyMiss ? -pStake : (pPayout != null ? pPayout - pStake : null)) : null);
                 const plActual = pReturned != null;
-                if (pStake != null) {
+                if (pStake != null && !isVoid) {
                     evStaked += pStake;
                     if (pPL != null) {
                         evNet += pPL;
@@ -16937,7 +16977,7 @@ async function renderArchivePanel(container) {
                 // Ledger-wide money. A settled slip with a stake but NO way to know what
                 // came back — cashed, no `returned`, no `payout` — is SKIPPED, not counted
                 // at zero return. Counting it would invent a total loss on a winner.
-                if (pStake != null && !anyPending) {
+                if (pStake != null && !anyPending && !isVoid) {
                     const ret = pReturned != null ? pReturned : (anyMiss ? 0 : (pPayout != null ? pPayout : null));
                     if (ret == null) {
                         money.skipped++;
@@ -16956,14 +16996,21 @@ async function renderArchivePanel(container) {
                         money.byBook.set(bk, b);
                     }
                 }
-                const plTag = pPL == null ? ''
+                const plTag = (pPL == null || isVoid) ? ''
                     : ` <i class="plp-pl ${pPL >= 0 ? 'pos' : 'neg'}${plActual ? '' : ' est'}" title="${plActual
                         ? `Actual: the book returned $${fmtMoney(pReturned)} on a $${fmtMoney(pStake)} stake.`
                         : `PROJECTED from the TO WIN figure, assuming all-or-nothing. If this book pays anything on a partial hit, the real number is higher — click the chip to record what actually came back.`}">${plActual ? '' : '≈'}${pPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(pPL))}</i>`;
                 const moneyChip = `<button class="plp-money${pStake == null ? ' empty' : ''}" data-plp-money-ev="${esc(e.evKey)}" data-plp-money-id="${esc(String(p.id))}" data-plp-settled="${anyPending ? '' : '1'}" title="${pStake == null
                     ? 'No stake recorded for this slip — click to add what you risked and the TO WIN total. Leave blank for slips you are not tracking in money.'
                     : `Risked $${fmtMoney(pStake)}${pPayout != null ? `, TO WIN $${fmtMoney(pPayout)} (the book's TOTAL RETURN, so profit on a cash is $${fmtMoney(pPayout - pStake)})` : ' — no TO WIN recorded, so profit cannot be computed'}. Click to edit.`}">${pStake == null ? '＄ add' : `$${fmtMoney(pStake)}${pPayout != null ? ` → $${fmtMoney(pPayout)}` : ''}`}${plTag}</button>`;
-                const removeBtn = `<button class="plp-remove" data-plp-ev="${esc(e.evKey)}" data-plp-id="${esc(String(p.id))}" data-plp-sum="${esc(legSummary)}" title="Remove this parlay from the ledger — use when the book voided it (a fight falling off the card) or it was placed by mistake. Re-place from Parlay Lab if needed.">✕</button>`;
+                // TWO controls, because the old single ✕ conflated two different things.
+                // ⊘ VOID  — the BOOK killed it. You did place it; keep the history, stop
+                //           counting it. Reversible.
+                // ✕ REMOVE — you recorded it BY MISTAKE. It should leave no trace.
+                const voidBtn = `<button class="plp-void${isVoid ? ' on' : ''}" data-plpv-ev="${esc(e.evKey)}" data-plpv-id="${esc(String(p.id))}" data-plpv-on="${isVoid ? '1' : ''}" data-plp-sum="${esc(legSummary)}" title="${isVoid
+                    ? 'This slip is marked VOID. Click to un-void it and put it back in the record.'
+                    : 'Mark VOID — the book killed this slip (a fight fell off the card), so it never resolved. It stays in the ledger but stops counting toward your cash record, money totals and concentration. Use ✕ instead if you recorded it by mistake.'}">⊘</button>`;
+                const removeBtn = `<button class="plp-remove" data-plp-ev="${esc(e.evKey)}" data-plp-id="${esc(String(p.id))}" data-plp-sum="${esc(legSummary)}" title="Remove this parlay from the ledger entirely — use when you recorded it BY MISTAKE and it should leave no trace. If the BOOK voided it, use ⊘ instead so the history is kept.">✕</button>`;
                 // GLOW-UP 305: the containment badge. Deliberately on BOTH slips — from the
                 // small one you need to know it buys you nothing the big one didn't already
                 // have; from the big one you need to know a second slip dies with it.
@@ -16978,7 +17025,7 @@ async function renderArchivePanel(container) {
                 // surface every parlay you have exposure to them in, not just slips where
                 // they happen to be the first leg.
                 const slipSearchKey = ledgerSearchKey(p.legs.map(x => `${x.fighter} ${x.opponent || ''}`).join(' '));
-                return `<div class="plp-parlay${inIdx >= 0 ? ' is-inside' : ''}" data-outcome="${anyPending ? 'pending' : anyMiss ? 'miss' : 'hit'}" data-name="${slipSearchKey}" style="--plg-i:${cardI}"><div class="plp-head"><span class="plp-title">${p.legs.length}-LEG</span>${p.legs[0]?.bookLabel ? `<span class="plp-book ${(() => { const k = String(p.legs[0]?.book || '').toLowerCase(); return k === 'pick6' ? 'bk-p6' : k === 'underdog' ? 'bk-ud' : k === 'prizepicks' ? 'bk-pp' : k === 'betr' ? 'bk-betr' : k.startsWith('draftkings') || k === 'dk' ? 'bk-dk' : ''; })()}">${p.legs[0].bookLabel}</span>` : ''}${containTag}${statusChip}${moneyChip}${removeBtn}</div><div class="plp-legs">${legRows}</div></div>`;
+                return `<div class="plp-parlay${inIdx >= 0 ? ' is-inside' : ''}${isVoid ? ' is-void' : ''}" data-outcome="${isVoid ? 'void' : anyPending ? 'pending' : anyMiss ? 'miss' : 'hit'}" data-name="${slipSearchKey}" style="--plg-i:${cardI}"><div class="plp-head"><span class="plp-title">${p.legs.length}-LEG</span>${p.legs[0]?.bookLabel ? `<span class="plp-book ${(() => { const k = String(p.legs[0]?.book || '').toLowerCase(); return k === 'pick6' ? 'bk-p6' : k === 'underdog' ? 'bk-ud' : k === 'prizepicks' ? 'bk-pp' : k === 'betr' ? 'bk-betr' : k.startsWith('draftkings') || k === 'dk' ? 'bk-dk' : ''; })()}">${p.legs[0].bookLabel}</span>` : ''}${containTag}${statusChip}${moneyChip}${voidBtn}${removeBtn}</div><div class="plp-legs">${legRows}</div></div>`;
             }).join('');
             const evCashed = slipOutcomes.filter(o => o === 'hit').length;
             const evSettledSlips = slipOutcomes.filter(o => o !== 'pending').length;
@@ -18455,6 +18502,43 @@ async function renderArchivePanel(container) {
     // always had. Confirms first: a slip is several legs and rebuilding it means
     // reconstructing the whole thing in Parlay Lab, so this is more costly to undo
     // than un-placing one leg.
+    container.querySelectorAll('.plp-void').forEach(btn => {
+        btn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            const evKey = btn.dataset.plpvEv || '';
+            const id = btn.dataset.plpvId || '';
+            const on = btn.dataset.plpvOn === '1';
+            const summary = btn.dataset.plpSum || 'this parlay';
+            if (!evKey || !id)
+                return;
+            if (on) {
+                if (!confirm(`Un-void this slip?
+
+${summary}
+
+It goes back into your cash record, money totals and concentration analysis.`))
+                    return;
+                const ok = await setPlacedParlayVoid(evKey, id, false);
+                showToast(ok ? '✓ Un-voided — back in the record' : 'Could not un-void');
+                if (ok)
+                    void renderArchivePanel(container);
+                return;
+            }
+            // Reason is optional and free text; it is the only durable note of WHY a
+            // slip stopped counting, which matters when reading the ledger months on.
+            const reason = prompt(`Mark VOID — the book killed this slip so it never resolved.
+
+${summary}
+
+Optional note (e.g. "Ochoa withdrew"). Leave blank to skip.`, '');
+            if (reason === null)
+                return;
+            const ok = await setPlacedParlayVoid(evKey, id, true, reason.trim() || undefined);
+            showToast(ok ? '⊘ Marked void — kept in the ledger, excluded from the record' : 'Could not void');
+            if (ok)
+                void renderArchivePanel(container);
+        });
+    });
     container.querySelectorAll('.plp-remove').forEach(btn => {
         btn.addEventListener('click', async (ev) => {
             ev.stopPropagation();
