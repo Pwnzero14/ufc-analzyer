@@ -215,6 +215,15 @@ export const NAME_ALIASES = {
     'Serghei Spivak': 'Serghei Spivac',
     'Sergey Spivac': 'Serghei Spivac',
     'Sergei Spivac': 'Serghei Spivac',
+    // 2026-09-08 (Noche UFC: Silva vs. Delgado): Pick6 renders him "R. Rongzhu" and
+    // the scrape reads that as a two-token name "Rong Rongzhu"; UFCStats and the
+    // card use the mononym "Rongzhu". Caught by the placed-leg dry run — the
+    // archive holds 60 rows under "Rongzhu" and exactly ONE under "Rong Rongzhu",
+    // that one being this event's Pick6 SS row. Without the alias a leg recorded
+    // under either spelling can fail to meet the row settle writes, which is the
+    // ungradeable-leg shape from [[project_leg_ungradeable_pulled_line]].
+    // Same person beyond doubt: same bout, opponent Rafa Garcia, line 69.5.
+    'Rong Rongzhu': 'Rongzhu',
     'Xiong Jing Nan': 'Xiong Jingnan',
     // Reverse-order variants: platforms sometimes list Chinese fighters in
     // Western order (given-family) while UFCStats uses Chinese order (family-given).

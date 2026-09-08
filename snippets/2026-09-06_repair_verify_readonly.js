@@ -39,6 +39,7 @@
     "Serghei Spivak": "Serghei Spivac",
     "Sergey Spivac": "Serghei Spivac",
     "Sergei Spivac": "Serghei Spivac",
+    "Rong Rongzhu": "Rongzhu",
     "Xiong Jing Nan": "Xiong Jingnan",
     "Kangjie Zhu": "Zhu Kangjie",
     "Meng Ding": "Ding Meng",
