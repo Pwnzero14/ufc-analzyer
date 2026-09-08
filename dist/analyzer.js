@@ -27480,6 +27480,99 @@ async function fixOpeningLines(pairs, platform = 'p6', stat = 'ss') {
     catch { /* board may not be mounted */ }
 }
 window.fixOpeningLines = fixOpeningLines;
+// ── NAME_ALIASES SANITY CHECK (console) ────────────────────────────────────
+// Born from a real bug: 'Damon Jackson' -> 'Donte Johnson' sat in the map since
+// June and MERGED TWO REAL FIGHTERS — a featherweight with 14 UFC fights filed
+// under a 9-0 middleweight. One man's history was erased, the other's polluted,
+// and every lean for either was computed on the mixture. It was only caught
+// because an unrelated sweep happened to surface it.
+//
+//   window.auditAliases()
+//
+// The signature that would have caught it on day one: BOTH names have their own
+// UFCStats cache and their fight DATES DO NOT OVERLAP. One person cannot fight
+// on two cards at once, so two full, disjoint histories means two people.
+//
+// Read-only. Reports, never edits — an alias is a judgement call about identity
+// and [[project_archive_wrong_fight_attribution]] is what automatic "fixes"
+// would risk.
+async function auditAliases() {
+    const all = await storageGetAll();
+    const nf = (v) => (normalizeName(String(v ?? '')) || '').toLowerCase();
+    // RAW normalisation — deliberately NOT normalizeName, which applies the very
+    // aliases under test and would make every entry look self-consistent.
+    const raw = (v) => String(v ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[^A-Za-z ]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    const caches = new Map();
+    for (const [k, v] of Object.entries(all)) {
+        if (/^ufcstats_v51_/.test(k) && v?.name && Array.isArray(v.fightHistory))
+            caches.set(raw(v.name), v);
+    }
+    const archive = Array.isArray(all['prop_archive_v1']) ? all['prop_archive_v1'] : [];
+    const archiveCount = new Map();
+    for (const r of archive) {
+        if (!r)
+            continue;
+        const k = raw(r.fighter);
+        archiveCount.set(k, (archiveCount.get(k) || 0) + 1);
+    }
+    const dates = (rec) => new Set((rec?.fightHistory || [])
+        .map((f) => String(f?.date ?? '').trim()).filter(Boolean));
+    const srcKeys = new Set(Object.keys(NAME_ALIASES).map(raw));
+    const rows = [];
+    for (const [src, dst] of Object.entries(NAME_ALIASES)) {
+        const S = raw(src), D = raw(dst);
+        const sc = caches.get(S), dc = caches.get(D);
+        const notes = [];
+        let severity = 0;
+        if (S === D) {
+            notes.push('SELF-MAPPING — does nothing, safe to delete');
+            severity = Math.max(severity, 1);
+        }
+        if (srcKeys.has(D) && S !== D) {
+            notes.push(`CHAIN — the target is itself an alias source, and normalizeName applies only ONE hop, so this half-resolves`);
+            severity = Math.max(severity, 2);
+        }
+        if (sc && dc && S !== D) {
+            const ds = dates(sc), dd = dates(dc);
+            const shared = [...ds].filter(d => dd.has(d));
+            if (ds.size && dd.size && shared.length === 0) {
+                notes.push(`*** LIKELY TWO DIFFERENT FIGHTERS *** both sides have a cache and share NO fight date (${ds.size} vs ${dd.size} fights). One person cannot fight two cards at once. THIS IS THE DAMON JACKSON SIGNATURE — verify against UFCStats before trusting either side.`);
+                severity = 3;
+            }
+            else if (shared.length) {
+                notes.push(`both cached, ${shared.length} shared fight date(s) — consistent with one person`);
+            }
+        }
+        else if (!dc && S !== D) {
+            notes.push('TARGET NOT CACHED — cannot confirm the canonical spelling exists; may be a typo');
+            severity = Math.max(severity, 2);
+        }
+        const aSrc = archiveCount.get(S) || 0, aDst = archiveCount.get(D) || 0;
+        if (!sc && !aSrc && S !== D) {
+            notes.push('source never seen in cache or archive — possibly obsolete');
+            severity = Math.max(severity, 1);
+        }
+        rows.push({
+            severity, alias: `${src}  ->  ${dst}`,
+            'src cached': sc ? `${sc.fightHistory.length}f` : '—',
+            'dst cached': dc ? `${dc.fightHistory.length}f` : '—',
+            'archive src': aSrc, 'archive dst': aDst,
+            notes: notes.join(' | ') || 'ok',
+        });
+    }
+    rows.sort((a, b) => Number(b.severity) - Number(a.severity));
+    console.log('%c[alias-audit] READ-ONLY', 'font-weight:bold;font-size:13px', `${rows.length} aliases`);
+    console.table(rows);
+    const bad = rows.filter(r => Number(r.severity) >= 3).length;
+    const warn = rows.filter(r => Number(r.severity) === 2).length;
+    const tidy = rows.filter(r => Number(r.severity) === 1).length;
+    console.log(`  ${bad} likely-two-fighters · ${warn} needs a look · ${tidy} tidy-up · ${rows.length - bad - warn - tidy} ok`);
+    if (bad)
+        console.log('%c  Verify the flagged ones against UFCStats. Removing an alias does NOT un-merge rows already written under it — see [[project_archive_wrong_fight_attribution]] for the relabel.', 'color:#f85149');
+    console.log('  NOTE: a same-person alias can still look "ok" here if only one side is cached — absence of a flag is not proof.');
+}
+window.auditAliases = auditAliases;
 // ── CLEAR ORPHAN RESULTS (console) ─────────────────────────────────────────
 // Clears `result` on rows for a card the fighter has no fight on record for.
 //
