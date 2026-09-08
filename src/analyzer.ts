@@ -1,7 +1,7 @@
 import { FighterDB, FightResult, FightStats, CareerStats } from './types/index.js';
 import type { LineWatchSettings, LineMovementEvent, WatchPlatform, WatchedStatType } from './types/index.js';
 import { FANTASY_SCORING, PRIZEPICKS_SCORING, NAME_ALIASES, MODEL_VERSION, FP_CONFIDENCE_CEILING, PICKEM_PAYOUTS, SS_PROJECTION_BIAS, SS_MARKET_ANCHOR_WEIGHT, FP_SHRINK_K, FP_LEAGUE_MEAN_SHARED, FP_LEAGUE_MEAN_PP, foldLetters } from './config/index.js';
-import { PropArchiveService, PropLinePredictorService } from './services/index.js';
+import { PropArchiveService, PropLinePredictorService, normalizePropType } from './services/index.js';
 import { ufcstatsFetchText } from './services/ufcstats-fetch.js';
 import type { PropArchiveRecord, PropPrediction, PredictionEvent, LearningResult, WeightClass, StatPrediction, BacktestCell, PredictorLineBacktest, BookCalibration } from './types/index.js';
 import { _weightMissSignals, parseWeightMissFromTitle, severityFromLbs, MANUAL_WEIGHT_MISS_KEY } from './analyzer/weight-miss.js';
@@ -518,6 +518,13 @@ const BP_SLATE_BOOK_ABBR: Record<string, string> = { pick6: 'P6', underdog: 'UD'
 // — the learning engine joins the two against results later.
 interface BestPicksPlacedRecord extends BestPicksSlatePick {
   placedAt: number;
+  // GLOW-UP 360 — see PlacedParlay. OPTIONAL BY DESIGN: a leg recorded only
+  // because it rides inside a parlay has no stake of its own, and leaving it
+  // blank is the correct state, not missing data. Straight bets carry both.
+  stake?: number;
+  payout?: number;
+  /** Actual money back INCLUDING stake — see PlacedParlay.returned. */
+  returned?: number;
   // GLOW-UP 174: settled outcome written back by the Placed Ledger once the
   // archive grades the leg — makes history permanent even after the archive
   // prunes the underlying rows. Absent while pending.
@@ -555,8 +562,113 @@ function aggregatePlacedPersonalRecord(placedRaw: unknown): Map<string, { hits: 
 // best_picks_placed_v1. Resolved in the Data view's Parlay Ledger.
 const STORAGE_PARLAY_PLACED_KEY = 'parlay_placed_v1' as const;
 interface PlacedParlayLeg { fighter: string; opponent: string | null; dir: string; stat: string; statLabel: string; line: number | null; book: string | null; bookLabel: string; }
-interface PlacedParlay { id: string; placedAt: number; legs: PlacedParlayLeg[]; }
-async function persistPlacedParlay(legs: PlacedParlayLeg[]): Promise<'placed' | 'dup' | 'err'> {
+// GLOW-UP 360 — STAKE + PAYOUT. Until now a slip graded hit/miss only and the
+// ledger could not say what any of it was worth; the schema gap was documented
+// and deliberate. Both are OPTIONAL: a leg that is part of a parlay carries no
+// stake of its own, and an older slip has neither.
+//
+// `payout` is the slip's "TO WIN" TOTAL RETURN as the book shows it — $150 at
+// 2.7x reads $405, not $255. So profit on a cash is (payout - stake) and a bust
+// is (-stake). Every tooltip in the ledger states that, because the alternative
+// reading is just as plausible and silently halves the P/L.
+// `returned` is the ACTUAL money back once the slip settles, INCLUDING the
+// stake: 0 on an outright loss, the stake back on a void or push, `payout` on a
+// clean cash, and something in between on a partial pick'em payout. When set it
+// OVERRIDES the projection — the projection assumes all-or-nothing, and this
+// app's own bust tooltip already warns that partial payouts may apply.
+// P&L is always (returned - stake); with no `returned` it falls back to the
+// projection, and the UI says which it is rather than passing an estimate off
+// as fact.
+// `voidedAt` marks a slip the BOOK voided — a fight fell off the card, so the
+// wager never resolved. It stays in the ledger (you did place it, and that is
+// history) but is excluded from the cash record, the money totals and the
+// containment analysis, because none of those questions have an answer for a bet
+// that never ran. Distinct from ✕ REMOVE, which is for a slip recorded BY
+// MISTAKE and should leave no trace. The old single ✕ conflated the two.
+interface PlacedParlay { id: string; placedAt: number; legs: PlacedParlayLeg[]; stake?: number; payout?: number; returned?: number; voidedAt?: number; voidReason?: string; }
+/**
+ * Set (or clear) a single placed LEG's stake and payout — for straight bets.
+ *
+ * Same null-clears-rather-than-zero rule as the parlay version: a leg that rides
+ * inside a parlay must stay blank, because the parlay already carries that money
+ * and recording it here too would double-count it in the totals.
+ */
+async function setPlacedLegMoney(evKey: string, legKey: string, stake: number | null, payout: number | null, returned?: number | null): Promise<boolean> {
+  try {
+    const payload = await storageGet<Record<string, unknown>>([STORAGE_BEST_PICKS_PLACED_KEY]);
+    const raw = payload[STORAGE_BEST_PICKS_PLACED_KEY];
+    const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...(raw as Record<string, Record<string, BestPicksPlacedRecord>>) } : {};
+    const legs = all[evKey] ? { ...all[evKey] } : null;
+    if (!legs || !legs[legKey]) return false;
+    const next: BestPicksPlacedRecord = { ...legs[legKey] };
+    if (stake == null) delete next.stake; else next.stake = stake;
+    if (payout == null) delete next.payout; else next.payout = payout;
+    if (returned !== undefined) { if (returned == null) delete next.returned; else next.returned = returned; }
+    legs[legKey] = next;
+    all[evKey] = legs;
+    await storageSet({ [STORAGE_BEST_PICKS_PLACED_KEY]: all });
+    return true;
+  } catch { return false; }
+}
+
+/** Mark a slip voided by the book, or un-void it. Reason is free text and optional. */
+async function setPlacedParlayVoid(evKey: string, id: string, voided: boolean, reason?: string): Promise<boolean> {
+  try {
+    const payload = await storageGet<Record<string, unknown>>([STORAGE_PARLAY_PLACED_KEY]);
+    const raw = payload[STORAGE_PARLAY_PLACED_KEY];
+    const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...(raw as Record<string, PlacedParlay[]>) } : {};
+    const list = Array.isArray(all[evKey]) ? [...all[evKey]] : [];
+    const i = list.findIndex(p => String(p.id) === String(id));
+    if (i < 0) return false;
+    const next: PlacedParlay = { ...list[i] };
+    if (voided) { next.voidedAt = Date.now(); if (reason) next.voidReason = reason; }
+    else { delete next.voidedAt; delete next.voidReason; }
+    list[i] = next;
+    all[evKey] = list;
+    await storageSet({ [STORAGE_PARLAY_PLACED_KEY]: all });
+    return true;
+  } catch { return false; }
+}
+
+/** Read one placed parlay by event + id. */
+async function getPlacedParlay(evKey: string, id: string): Promise<PlacedParlay | null> {
+  const payload = await storageGet<Record<string, unknown>>([STORAGE_PARLAY_PLACED_KEY]);
+  const raw = payload[STORAGE_PARLAY_PLACED_KEY];
+  const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, PlacedParlay[]> : {};
+  return (all[evKey] || []).find(p => String(p.id) === String(id)) || null;
+}
+
+/**
+ * Set (or clear) one slip's stake and payout.
+ *
+ * null CLEARS the field — it does not store 0. "Not tracked" and "$0 risked" are
+ * different claims and the ledger's totals must not confuse them: a slip with no
+ * stake is excluded from staked/P&L entirely, whereas a $0 stake would drag a
+ * realised return toward zero.
+ */
+async function setPlacedParlayMoney(evKey: string, id: string, stake: number | null, payout: number | null, returned?: number | null): Promise<boolean> {
+  try {
+    const payload = await storageGet<Record<string, unknown>>([STORAGE_PARLAY_PLACED_KEY]);
+    const raw = payload[STORAGE_PARLAY_PLACED_KEY];
+    const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...(raw as Record<string, PlacedParlay[]>) } : {};
+    const list = Array.isArray(all[evKey]) ? [...all[evKey]] : [];
+    const i = list.findIndex(p => String(p.id) === String(id));
+    if (i < 0) return false;
+    const next: PlacedParlay = { ...list[i] };
+    if (stake == null) delete next.stake; else next.stake = stake;
+    if (payout == null) delete next.payout; else next.payout = payout;
+    // undefined = the caller never asked (slip still pending); null = clear it.
+    // 0 is a REAL value here — an outright loss returns nothing — so this can
+    // never be a falsy test.
+    if (returned !== undefined) { if (returned == null) delete next.returned; else next.returned = returned; }
+    list[i] = next;
+    all[evKey] = list;
+    await storageSet({ [STORAGE_PARLAY_PLACED_KEY]: all });
+    return true;
+  } catch { return false; }
+}
+
+async function persistPlacedParlay(legs: PlacedParlayLeg[], stake?: number | null, payout?: number | null): Promise<'placed' | 'dup' | 'err'> {
   try {
     const payload = await storageGet<Record<string, unknown>>([STORAGE_PARLAY_PLACED_KEY]);
     const raw = payload[STORAGE_PARLAY_PLACED_KEY];
@@ -577,7 +689,10 @@ async function persistPlacedParlay(legs: PlacedParlayLeg[]): Promise<'placed' | 
       .sort().join(',');
     const sig = sigOf(legs);
     if (list.some(p => sigOf(p.legs || []) === sig)) return 'dup';
-    list.unshift({ id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, placedAt: Date.now(), legs });
+    const rec: PlacedParlay = { id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, placedAt: Date.now(), legs };
+    if (Number.isFinite(Number(stake)) && Number(stake) > 0) rec.stake = Number(stake);
+    if (Number.isFinite(Number(payout)) && Number(payout) > 0) rec.payout = Number(payout);
+    list.unshift(rec);
     all[evKey] = list.slice(0, 30);
     const evKeys = Object.keys(all);
     if (evKeys.length > 20) {
@@ -11988,7 +12103,18 @@ interface ParlayHealth {
   };
 }
 
+// GLOW-UP 360 — money formatting, one copy. Trims the .00 on whole amounts so a
+// ledger of round stakes stays readable, keeps cents when they exist.
+function fmtMoney(n: number): string {
+  const v = Math.round(Number(n) * 100) / 100;
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
 const parlaySelectedLegs: Set<string> = new Set(); // "fighter|stat|dir" keys
+// GLOW-UP 360 — stake/payout typed in the Parlay Lab, held here so a re-render
+// (timer, line refresh, leg toggle) does not wipe them mid-entry. Cleared only
+// on a successful save; a duplicate rejection keeps them for the retry.
+let _parlayStake: number | null = null;
+let _parlayPayout: number | null = null;
 
 // GLOW-UP 177 (Parlay Lab level 1): pool command strip — view-only sort/
 // filter over the AVAILABLE LEGS pool. Session-scoped (resets on reload):
@@ -13521,8 +13647,15 @@ function renderParlayLab(container: HTMLElement): void {
     : '';
   // GLOW-UP 181: place the whole slip into the Parlay Ledger (Data view).
   // Needs 2+ legs — a parlay by definition.
+  // GLOW-UP 360 — stake + payout entered AT PLACEMENT, which is the only moment
+  // the numbers are in front of you. Backed by module-level state because the
+  // board re-renders on a timer and on every line refresh; a bare input would be
+  // wiped mid-entry and the slip would save with no stake.
+  const stakeInputs = selectedPairs.length >= 2
+    ? `<span class="parlay-stake-wrap"><label class="parlay-stake-lab" title="What you actually risked on this slip. Leave blank to record the slip without money tracking.">$<input type="number" class="parlay-stake-in" data-parlay-stake="1" min="0" step="any" placeholder="stake" value="${_parlayStake ?? ''}" /></label><label class="parlay-stake-lab" title="The slip's TO WIN figure — the TOTAL RETURN if it cashes, exactly as the book shows it ($150 at 2.7x reads $405, not $255). Profit on a cash is payout minus stake.">→<input type="number" class="parlay-stake-in" data-parlay-payout="1" min="0" step="any" placeholder="to win" value="${_parlayPayout ?? ''}" /></label></span>`
+    : '';
   const placeParlayBtn = selectedPairs.length >= 2
-    ? `<button class="parlay-place-slip" data-parlay-place="1" title="Save this slip to your Parlay Ledger (Data view) for this event — records what you actually entered, graded against results after the event">● PLACE PARLAY</button>`
+    ? `${stakeInputs}<button class="parlay-place-slip" data-parlay-place="1" title="Save this slip to your Parlay Ledger (Data view) for this event — records what you actually entered, graded against results after the event. Stake and TO WIN are saved with it when filled.">● PLACE PARLAY</button>`
     : '';
 
   // Slip intelligence: calibrated per-leg probabilities (same recalibration the
@@ -14039,12 +14172,30 @@ function renderParlayLab(container: HTMLElement): void {
       });
       const original = btn.textContent || '';
       btn.classList.add('placed');
-      void persistPlacedParlay(legs).then((res) => {
+      void persistPlacedParlay(legs, _parlayStake, _parlayPayout).then((res) => {
         btn.textContent = res === 'placed' ? '✓ PLACED' : res === 'dup' ? '✓ ALREADY PLACED' : '✕ FAILED';
-        if (res === 'placed') showToast('✓ Parlay saved to your Parlay Ledger (Data view)');
+        if (res === 'placed') {
+          const money = _parlayStake ? ` · $${_parlayStake}${_parlayPayout ? ` → $${_parlayPayout}` : ''}` : '';
+          showToast(`✓ Parlay saved to your Parlay Ledger (Data view)${money}`);
+          // Clear only on a real save, so a duplicate rejection does not silently
+          // discard numbers the user still needs for the retry.
+          _parlayStake = null; _parlayPayout = null;
+        }
         setTimeout(() => { btn.textContent = original; btn.classList.remove('placed'); }, 1600);
       });
     });
+  });
+
+  container.querySelectorAll<HTMLInputElement>('input[data-parlay-stake], input[data-parlay-payout]').forEach(inp => {
+    const isStake = inp.hasAttribute('data-parlay-stake');
+    inp.addEventListener('input', () => {
+      const v = parseFloat(inp.value);
+      const val = Number.isFinite(v) && v > 0 ? v : null;
+      if (isStake) _parlayStake = val; else _parlayPayout = val;
+    });
+    // Typing in the slip must not be read as a board keystroke (the page binds
+    // single-key shortcuts), and Enter should not submit anything.
+    inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') e.preventDefault(); });
   });
 
   container.querySelectorAll<HTMLElement>('.parlay-suggest-card').forEach(card => {
@@ -16364,7 +16515,7 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
   // event), live-joined against the archive: ✓ HIT / ✗ MISS with the actual
   // number once the prop settles, ○ PENDING until then. Read-only join —
   // persistence of outcomes is level 3's job.
-  type PlacedLedgerRec = { name: string; pretty: string; dir: string; source: string; statLabel: string; line: number | null; book: string | null; bookLabel: string; opponent: string | null; placedAt: number; outcome?: 'hit' | 'miss'; actual?: number | null; resolvedAt?: number };
+  type PlacedLedgerRec = { name: string; pretty: string; dir: string; source: string; statLabel: string; line: number | null; book: string | null; bookLabel: string; opponent: string | null; placedAt: number; outcome?: 'hit' | 'miss'; actual?: number | null; resolvedAt?: number; stake?: number; payout?: number; returned?: number };
   type PlacedOutcomeUpdate = { evKey: string; legKey: string; outcome: 'hit' | 'miss'; actual: number | null };
   // Placed source key → archive PropType candidates. FP is book-aware:
   // PrizePicks scores differently, so it archives as Fantasy_PP. Hoisted to
@@ -16521,7 +16672,7 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
     // makes the ledger survive archive pruning. This only makes the disagreement
     // VISIBLE instead of silent.
     type LedgerDrift = { storedActual: number | null; freshActual: number; freshOutcome: 'hit' | 'miss' } | null;
-    type LedgerLeg = { rec: PlacedLedgerRec; outcome: 'hit' | 'miss' | 'pending'; actual: number | null; drift: LedgerDrift };
+    type LedgerLeg = { rec: PlacedLedgerRec; legKey: string; outcome: 'hit' | 'miss' | 'pending'; actual: number | null; drift: LedgerDrift };
     const events: { evKey: string; newest: number; legs: LedgerLeg[] }[] = [];
     // GLOW-UP 174: legs that just settled get their outcome queued for
     // write-back so history survives archive pruning; legs with a persisted
@@ -16580,6 +16731,7 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
             && (now.outcome !== rec.outcome || !Number.isFinite(stored) || Math.abs((now.actual as number) - stored) > 0.05);
           return {
             rec,
+            legKey,
             outcome: rec.outcome,
             // STORED wins the display again (361). The archive's value lives on
             // in drift.freshActual and is named in the tooltip.
@@ -16597,7 +16749,7 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         const res = resolveVsArchive(evDk, rec.name, propTypesFor(rec.source, rec.book), rec.line, dir);
         if (res.outcome !== 'pending') updates.push({ evKey, legKey, outcome: res.outcome, actual: res.actual });
         // Freshly resolved this render — it cannot be stale, so never marked.
-        return { rec, outcome: res.outcome, actual: res.actual, drift: null };
+        return { rec, legKey, outcome: res.outcome, actual: res.actual, drift: null };
       });
       events.push({ evKey, newest: Math.max(0, ...legEntries.map(([, r]) => Number(r.placedAt) || 0)), legs });
     }
@@ -16817,6 +16969,9 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
       const concChip = fightsOnCard
         ? `<span class="plg-ev-conc${maxOnOneFight >= 4 ? ' hot' : ''}" title="${e.legs.length} legs spread across ${fightsOnCard} fight${fightsOnCard === 1 ? '' : 's'}${stackedFights ? `, ${stackedFights} of which carry more than one position` : ', none of them stacked'}. Your deepest single fight holds ${maxOnOneFight} leg${maxOnOneFight === 1 ? '' : 's'} — that is ${Math.round((maxOnOneFight / e.legs.length) * 100)}% of this card riding on one result. Legs are already sorted by fight and share a lit spine, so a stack reads as one block.">${fightsOnCard} FIGHT${fightsOnCard === 1 ? '' : 'S'}${maxOnOneFight > 1 ? ` · MAX ${maxOnOneFight}` : ''}</span>`
         : '';
+      // GLOW-UP 360 — per-card straight-bet totals. Parlay stakes live in the
+      // parlay ledger; counting them here too would double-count the same money.
+      let evLegStaked = 0, evLegNet = 0;
       const sortedLegs = [...e.legs].sort((a, b) => {
         const ka = fightKeyOf(a.rec), kb = fightKeyOf(b.rec);
         if (ka !== kb) return ka < kb ? -1 : 1;
@@ -16877,7 +17032,10 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
               : ` title="The archive disagrees with this settled value: shown ${l.actual}${unit}, archive ${Math.round(l.drift.freshActual * 10) / 10}${unit} (${l.drift.storedActual != null && l.drift.freshActual > l.drift.storedActual ? '+' : ''}${l.drift.storedActual != null ? Math.round((l.drift.freshActual - l.drift.storedActual) * 10) / 10 : '?'}). Your ${r.dir} grades ${String(l.outcome).toUpperCase()} on either number, so the verdict is unaffected. NEITHER side is automatically trusted: recomputing from UFCStats components put the archive RIGHT on the SS drifts and WRONG on the FP ones, and 81 archive Fantasy rows disagree with computed FP for reasons not yet understood."`)
           : '';
         const actualHtml = l.actual != null
-          ? `<span class="plg-actual${driftCls}"${driftTitle}>actual <b>${Math.round(l.actual * 10) / 10}${unit}</b></span>`
+          // GLOW-UP 363 L4 — the word "actual" was repeated on all 198 rows while
+          // the column header already says ACTUAL. Removing it is not decoration:
+          // it lets the number sit in a tabular column that can be scanned down.
+          ? `<span class="plg-actual${driftCls}"${driftTitle}><b>${Math.round(l.actual * 10) / 10}</b>${unit}</span>`
           : '';
         // ── GLOW-UP 311 · YOUR entry against the close, on the row ─────────────
         // The CLV panel above this reads ai_lean_snapshots — the BOARD's lines. On
@@ -16919,9 +17077,27 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         // GLOW-UP 359: BOTH corners, so searching either name returns the fight.
         // Lowercased and stripped to the same alphabet the handler reduces the
         // query to, so "O'Malley" and "omalley" land on each other.
+        // GLOW-UP 360 — per-leg stake, for STRAIGHT bets only.
+        // Rides INSIDE .plc-name rather than as a new cell: .plg-leg becomes a
+        // grid of 8-10 tracks at the breakpoints below and an extra child
+        // overflows into an implicit row (bug 347). The chip is only rendered
+        // when a stake exists — most legs are parlay riders with no stake of
+        // their own, and a row of empty ＄ affordances would bury the real ones.
+        const lStake = Number.isFinite(Number(r.stake)) ? Number(r.stake) : null;
+        const lPayout = Number.isFinite(Number(r.payout)) ? Number(r.payout) : null;
+        const lReturned = Number.isFinite(Number(r.returned)) ? Number(r.returned) : null;
+        const lPL = lStake == null ? null
+          : lReturned != null ? lReturned - lStake
+          : (l.outcome !== 'pending' ? (l.outcome === 'miss' ? -lStake : (lPayout != null ? lPayout - lStake : null)) : null);
+        const lActual = lReturned != null;
+        if (lStake != null) { evLegStaked += lStake; if (lPL != null) { evLegNet += lPL; } }
+        const escM = (x: string): string => String(x).replace(/"/g, '&quot;');
+        const legMoney = lStake == null
+          ? `<button class="plc-money empty" data-plcm-ev="${escM(e.evKey)}" data-plcm-key="${escM(l.legKey)}" data-plcm-settled="${l.outcome === 'pending' ? '' : '1'}" title="No stake on this leg. Leave it blank if the leg rides inside a parlay — the parlay carries the money. Click to record a stake if you bet this one straight.">＄</button>`
+          : `<button class="plc-money" data-plcm-ev="${escM(e.evKey)}" data-plcm-key="${escM(l.legKey)}" data-plcm-settled="${l.outcome === 'pending' ? '' : '1'}" title="Straight bet: risked $${fmtMoney(lStake)}${lPayout != null ? `, TO WIN $${fmtMoney(lPayout)} total return` : ' — no TO WIN recorded'}.${lActual ? ` The book actually returned $${fmtMoney(lReturned!)}.` : lPL != null ? ' P&L below is PROJECTED from TO WIN and assumes all-or-nothing — record the actual return if it paid a partial.' : ''} Click to edit.">$${fmtMoney(lStake)}${lPL != null ? ` <i class="plp-pl ${lPL >= 0 ? 'pos' : 'neg'}${lActual ? '' : ' est'}">${lActual ? '' : '≈'}${lPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(lPL))}</i>` : ''}</button>`;
         const searchKey = ledgerSearchKey(`${r.name} ${r.opponent || ''}`);
         return `<div class="plg-leg${nFight > 1 ? ' in-group' : ''}${isGroupHead ? ' group-head' : ''}" data-outcome="${l.outcome}" data-name="${searchKey}" style="--plg-i:${Math.min(rowI, 28)}">
-          <span class="plc-name">${r.pretty}</span>
+          <span class="plc-name">${r.pretty}${legMoney}</span>
           <b class="bps-dir ${r.dir === 'OVER' ? 'ov' : 'un'}">${r.dir}</b>
           <span class="bps-line">${r.line ?? '—'}</span>
           <i class="bps-stat st-${r.source}">${r.statLabel}</i>
@@ -16950,15 +17126,21 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
       const collapsed = _ledgerCollapsedEvents.has(ledgerEvKey('placed', e.evKey));
       const strip = ledgerOutcomeStrip(sortedLegs.map(l => l.outcome === 'hit' ? 'hit' : l.outcome === 'miss' ? 'miss' : 'pending'));
       const pendN = e.legs.length - evSettled;
+      const evLegMoney = evLegStaked > 0
+        ? `<span class="plg-ev-money${evLegNet !== 0 ? (evLegNet >= 0 ? ' pos' : ' neg') : ''}" title="$${fmtMoney(evLegStaked)} staked on STRAIGHT bets on this card — legs you backed on their own. Parlay stakes are counted in the Parlay Ledger instead, so the same money is never counted twice.${evLegNet !== 0 ? ` Settled straight bets are ${evLegNet >= 0 ? 'up' : 'down'} $${fmtMoney(Math.abs(evLegNet))}.` : ''}">$${fmtMoney(evLegStaked)}${evLegNet !== 0 ? ` · ${evLegNet >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(evLegNet))}` : ''}</span>`
+        : '';
       const pendChip = pendN
         ? `<span class="plg-ev-record pend" title="${pendN} of ${e.legs.length} legs have no settled archive result yet">○ ${pendN}</span>`
         : '';
-      return `<div class="plg-event${collapsed ? ' ev-collapsed' : ''}" data-ledger="placed" data-evkey="${e.evKey.replace(/"/g, '&quot;')}">
+      // GLOW-UP 364 L4 — an event with nothing settled renders three empty
+      // columns (ENTRY→CLOSE / ACTUAL / RESULT) and reads as broken rather than
+      // as waiting. The class lets it say so.
+      return `<div class="plg-event${collapsed ? ' ev-collapsed' : ''}${evSettled === 0 ? ' all-pending' : ''}" data-ledger="placed" data-evkey="${e.evKey.replace(/"/g, '&quot;')}">
         <button type="button" class="plg-ev-head" aria-expanded="${collapsed ? 'false' : 'true'}">
           <span class="plg-ev-caret" aria-hidden="true">▾</span>
           <span class="plg-ev-name">${e.evKey}</span>
           <span class="plg-ev-legs" title="${e.legs.length} placed legs on this card">${e.legs.length}</span>
-          ${concChip}${strip}${evSummary}${pendChip}
+          ${concChip}${strip}${evLegMoney}${evSummary}${pendChip}
         </button>
         <div class="plg-ev-body"><div class="plg-ev-inner">${colHead}${rows}</div></div>
       </div>`;
@@ -17018,22 +17200,29 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
   // Placed slips (parlay_placed_v1) resolved leg-by-leg through the same
   // resolver; a slip CASHES only if every leg hits (partial pick'em payouts
   // are noted but not modeled here — this is the all-or-nothing view).
-  const parlayLedgerData = ((): { html: string; count: number; cashed: number; settled: number } => {
+  // GLOW-UP 361 — MONEY, alongside the cash rate.
+  // "12/58 cashed" answers how OFTEN slips land, which is a different question
+  // from whether they made money: 21% at 8x is a profit and 21% at 2.7x is a
+  // rout. The ledger only ever answered the first. `money` carries the second.
+  type LedgerMoney = { staked: number; returned: number; slips: number; skipped: number; projected: number; byBook: Map<string, { staked: number; returned: number; slips: number }> };
+  const parlayLedgerData = ((): { html: string; count: number; cashed: number; settled: number; money: LedgerMoney } => {
     const raw = result[STORAGE_PARLAY_PLACED_KEY];
     const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, PlacedParlay[]>) : {};
     const evs = Object.entries(all)
       .map(([evKey, list]) => ({ evKey, list: Array.isArray(list) ? list : [] }))
       .filter(e => e.list.length);
     if (!evs.length) {
-      return { html: '<div class="inline-empty-msg" style="font-size:10px">No placed parlays yet — build a slip in Parlay Lab and hit ● PLACE PARLAY</div>', count: 0, cashed: 0, settled: 0 };
+      return { html: '<div class="inline-empty-msg" style="font-size:10px">No placed parlays yet — build a slip in Parlay Lab and hit ● PLACE PARLAY</div>', count: 0, cashed: 0, settled: 0, money: { staked: 0, returned: 0, slips: 0, skipped: 0, projected: 0, byBook: new Map() } };
     }
     evs.sort((a, b) => Math.max(0, ...b.list.map(p => p.placedAt || 0)) - Math.max(0, ...a.list.map(p => p.placedAt || 0)));
     // GLOW-UP 350: same collapse contract as the placed ledger, keyed separately
     // so opening an event in one ledger does not open it in the other.
     applyLedgerCollapseDefaults('parlay', evs.map(e => e.evKey));
     let count = 0, cashed = 0, settledSlips = 0;
+    const money: LedgerMoney = { staked: 0, returned: 0, slips: 0, skipped: 0, projected: 0, byBook: new Map() };
     const html = evs.map(e => {
       const evDk = eventDedupeKey(e.evKey);
+      let evStaked = 0, evNet = 0, evNetSlips = 0, evProjected = 0;
       // ── GLOW-UP 305/306 · slips are not independent, and the ledger said nothing
       // Two facts live ACROSS slips, so no per-slip renderer could ever surface
       // them, and this ledger only ever rendered one slip at a time:
@@ -17048,7 +17237,10 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
       // Both are computed once per event, before any card renders.
       const legKeyOf = (l: { fighter?: string; dir?: string; line?: number | null; stat?: string }): string =>
         `${String(l.fighter || '').toLowerCase()}|${l.dir}|${l.line}|${l.stat}`;
-      const slipSets = e.list.map(p => new Set((p.legs || []).map(legKeyOf)));
+      // A voided slip is not exposure. Leaving it in would report "⊃ HOLDS 1"
+      // pointing at a wager that never ran, and inflate the ×n shared-leg counts
+      // that exist to show concentration. Empty set = invisible to both.
+      const slipSets = e.list.map(p => p.voidedAt ? new Set<string>() : new Set((p.legs || []).map(legKeyOf)));
       const legSlipCount = new Map<string, number>();
       for (const set of slipSets) for (const k of set) legSlipCount.set(k, (legSlipCount.get(k) || 0) + 1);
       // Strictly smaller AND fully contained. Equal-size duplicates are a different
@@ -17077,9 +17269,17 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         const hitN = legs.filter(x => x.outcome === 'hit').length;
         const anyPending = legs.some(x => x.outcome === 'pending');
         const anyMiss = legs.some(x => x.outcome === 'miss');
-        if (!anyPending) { settledSlips++; if (!anyMiss) cashed++; }
-        slipOutcomes.push(anyPending ? 'pending' : anyMiss ? 'miss' : 'hit');
-        const statusChip = anyPending
+        const isVoid = !!p.voidedAt;
+        // A void has no outcome. It is not a pending bet, not a win and not a
+        // loss, so it must not reach the cash record or the outcome strip — the
+        // whole reason this state exists rather than deleting the slip.
+        if (!isVoid) {
+          if (!anyPending) { settledSlips++; if (!anyMiss) cashed++; }
+          slipOutcomes.push(anyPending ? 'pending' : anyMiss ? 'miss' : 'hit');
+        }
+        const statusChip = isVoid
+          ? `<span class="plg-status void" title="Voided by the book${p.voidReason ? ` — ${String(p.voidReason).replace(/"/g, '&quot;')}` : ''}. Kept in the ledger because you did place it, but excluded from the cash record, the money totals and the concentration analysis: a bet that never ran has no outcome. Click ⊘ again to un-void.">⊘ VOID</span>`
+          : anyPending
           ? `<span class="plg-status pending" title="${legs.length - settledN} leg(s) not settled yet">○ ${settledN}/${legs.length} SETTLED</span>`
           : anyMiss
           // GLOW-UP 307: a slip one leg from cashing and a slip that missed
@@ -17106,7 +17306,51 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
           .map(l => `${prettyName(l.fighter)} ${l.dir} ${l.line ?? '—'} ${l.statLabel}`)
           .join('  +  ');
         const esc = (x: string): string => String(x).replace(/"/g, '&quot;');
-        const removeBtn = `<button class="plp-remove" data-plp-ev="${esc(e.evKey)}" data-plp-id="${esc(String(p.id))}" data-plp-sum="${esc(legSummary)}" title="Remove this parlay from the ledger — use when the book voided it (a fight falling off the card) or it was placed by mistake. Re-place from Parlay Lab if needed.">✕</button>`;
+        // GLOW-UP 360 — stake / TO WIN / realised P&L.
+        // payout is the TOTAL RETURN the book advertises, so a cash is
+        // (payout - stake) and a bust is (-stake). Nothing is shown as profit
+        // until the slip actually settles; a pending slip shows the wager only.
+        const pStake = Number.isFinite(Number(p.stake)) ? Number(p.stake) : null;
+        const pPayout = Number.isFinite(Number(p.payout)) ? Number(p.payout) : null;
+        // A RECORDED return always wins. The fallback is a PROJECTION that assumes
+        // all-or-nothing, which is exactly the assumption partial pick'em payouts
+        // break, so it is marked with ≈ and never silently presented as fact.
+        const pReturned = Number.isFinite(Number(p.returned)) ? Number(p.returned) : null;
+        const pPL = pStake == null ? null
+          : pReturned != null ? pReturned - pStake
+          : (!anyPending ? (anyMiss ? -pStake : (pPayout != null ? pPayout - pStake : null)) : null);
+        const plActual = pReturned != null;
+        if (pStake != null && !isVoid) { evStaked += pStake; if (pPL != null) { evNet += pPL; evNetSlips++; if (!plActual) evProjected++; } }
+        // Ledger-wide money. A settled slip with a stake but NO way to know what
+        // came back — cashed, no `returned`, no `payout` — is SKIPPED, not counted
+        // at zero return. Counting it would invent a total loss on a winner.
+        if (pStake != null && !anyPending && !isVoid) {
+          const ret = pReturned != null ? pReturned : (anyMiss ? 0 : (pPayout != null ? pPayout : null));
+          if (ret == null) { money.skipped++; }
+          else {
+            money.staked += pStake; money.returned += ret; money.slips++;
+            if (pReturned == null) money.projected++;
+            const bk = String(p.legs[0]?.bookLabel || 'No book');
+            const b = money.byBook.get(bk) || { staked: 0, returned: 0, slips: 0 };
+            b.staked += pStake; b.returned += ret; b.slips++;
+            money.byBook.set(bk, b);
+          }
+        }
+        const plTag = (pPL == null || isVoid) ? ''
+          : ` <i class="plp-pl ${pPL >= 0 ? 'pos' : 'neg'}${plActual ? '' : ' est'}" title="${plActual
+              ? `Actual: the book returned $${fmtMoney(pReturned!)} on a $${fmtMoney(pStake!)} stake.`
+              : `PROJECTED from the TO WIN figure, assuming all-or-nothing. If this book pays anything on a partial hit, the real number is higher — click the chip to record what actually came back.`}">${plActual ? '' : '≈'}${pPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(pPL))}</i>`;
+        const moneyChip = `<button class="plp-money${pStake == null ? ' empty' : ''}" data-plp-money-ev="${esc(e.evKey)}" data-plp-money-id="${esc(String(p.id))}" data-plp-settled="${anyPending ? '' : '1'}" title="${pStake == null
+          ? 'No stake recorded for this slip — click to add what you risked and the TO WIN total. Leave blank for slips you are not tracking in money.'
+          : `Risked $${fmtMoney(pStake)}${pPayout != null ? `, TO WIN $${fmtMoney(pPayout)} (the book's TOTAL RETURN, so profit on a cash is $${fmtMoney(pPayout - pStake)})` : ' — no TO WIN recorded, so profit cannot be computed'}. Click to edit.`}">${pStake == null ? '＄ add' : `$${fmtMoney(pStake)}${pPayout != null ? ` → $${fmtMoney(pPayout)}` : ''}`}${plTag}</button>`;
+        // TWO controls, because the old single ✕ conflated two different things.
+        // ⊘ VOID  — the BOOK killed it. You did place it; keep the history, stop
+        //           counting it. Reversible.
+        // ✕ REMOVE — you recorded it BY MISTAKE. It should leave no trace.
+        const voidBtn = `<button class="plp-void${isVoid ? ' on' : ''}" data-plpv-ev="${esc(e.evKey)}" data-plpv-id="${esc(String(p.id))}" data-plpv-on="${isVoid ? '1' : ''}" data-plp-sum="${esc(legSummary)}" title="${isVoid
+          ? 'This slip is marked VOID. Click to un-void it and put it back in the record.'
+          : 'Mark VOID — the book killed this slip (a fight fell off the card), so it never resolved. It stays in the ledger but stops counting toward your cash record, money totals and concentration. Use ✕ instead if you recorded it by mistake.'}">⊘</button>`;
+        const removeBtn = `<button class="plp-remove" data-plp-ev="${esc(e.evKey)}" data-plp-id="${esc(String(p.id))}" data-plp-sum="${esc(legSummary)}" title="Remove this parlay from the ledger entirely — use when you recorded it BY MISTAKE and it should leave no trace. If the BOOK voided it, use ⊘ instead so the history is kept.">✕</button>`;
         // GLOW-UP 305: the containment badge. Deliberately on BOTH slips — from the
         // small one you need to know it buys you nothing the big one didn't already
         // have; from the big one you need to know a second slip dies with it.
@@ -17121,7 +17365,7 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
         // surface every parlay you have exposure to them in, not just slips where
         // they happen to be the first leg.
         const slipSearchKey = ledgerSearchKey(p.legs.map(x => `${x.fighter} ${x.opponent || ''}`).join(' '));
-        return `<div class="plp-parlay${inIdx >= 0 ? ' is-inside' : ''}" data-outcome="${anyPending ? 'pending' : anyMiss ? 'miss' : 'hit'}" data-name="${slipSearchKey}" style="--plg-i:${cardI}"><div class="plp-head"><span class="plp-title">${p.legs.length}-LEG</span>${p.legs[0]?.bookLabel ? `<span class="plp-book ${(() => { const k = String(p.legs[0]?.book || '').toLowerCase(); return k === 'pick6' ? 'bk-p6' : k === 'underdog' ? 'bk-ud' : k === 'prizepicks' ? 'bk-pp' : k === 'betr' ? 'bk-betr' : k.startsWith('draftkings') || k === 'dk' ? 'bk-dk' : ''; })()}">${p.legs[0].bookLabel}</span>` : ''}${containTag}${statusChip}${removeBtn}</div><div class="plp-legs">${legRows}</div></div>`;
+        return `<div class="plp-parlay${inIdx >= 0 ? ' is-inside' : ''}${isVoid ? ' is-void' : ''}" data-outcome="${isVoid ? 'void' : anyPending ? 'pending' : anyMiss ? 'miss' : 'hit'}" data-name="${slipSearchKey}" style="--plg-i:${cardI}"><div class="plp-head"><span class="plp-title">${p.legs.length}-LEG</span>${p.legs[0]?.bookLabel ? `<span class="plp-book ${(() => { const k = String(p.legs[0]?.book || '').toLowerCase(); return k === 'pick6' ? 'bk-p6' : k === 'underdog' ? 'bk-ud' : k === 'prizepicks' ? 'bk-pp' : k === 'betr' ? 'bk-betr' : k.startsWith('draftkings') || k === 'dk' ? 'bk-dk' : ''; })()}">${p.legs[0].bookLabel}</span>` : ''}${containTag}${statusChip}${moneyChip}${voidBtn}${removeBtn}</div><div class="plp-legs">${legRows}</div></div>`;
       }).join('');
       const evCashed = slipOutcomes.filter(o => o === 'hit').length;
       const evSettledSlips = slipOutcomes.filter(o => o !== 'pending').length;
@@ -17129,20 +17373,53 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
       const recChip = evSettledSlips
         ? `<span class="plg-ev-record ${evCashed * 3 >= evSettledSlips ? 'good' : 'bad'}" title="${evCashed} of ${evSettledSlips} settled slips cashed on this card">CASHED ${evCashed}/${evSettledSlips}</span>`
         : `<span class="plg-ev-record">all pending</span>`;
+      const evMoney = evStaked > 0
+        ? `<span class="plg-ev-money${evNetSlips ? (evNet >= 0 ? ' pos' : ' neg') : ''}" title="$${fmtMoney(evStaked)} staked across the slips on this card that carry a stake.${evNetSlips ? ` ${evNetSlips} of them have settled, for a ${evNet >= 0 ? 'profit' : 'loss'} of $${fmtMoney(Math.abs(evNet))}.${evProjected ? ` ${evProjected} of those ${evProjected === 1 ? 'is a PROJECTION' : 'are PROJECTIONS'} from the TO WIN figure rather than a recorded return, so this assumes all-or-nothing and will be wrong for any slip that paid on a partial hit — record the actual return on those chips.` : ' All figures are recorded actuals.'} Slips with no TO WIN recorded are counted at stake only when they bust and skipped when they cash, so this understates a win rather than inventing one.` : ' None have settled yet.'}">$${fmtMoney(evStaked)}${evNetSlips ? ` · ${evNet >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(evNet))}` : ''}</span>`
+        : '';
       return `<div class="plg-event${collapsed ? ' ev-collapsed' : ''}" data-ledger="parlay" data-evkey="${e.evKey.replace(/"/g, '&quot;')}">
         <button type="button" class="plg-ev-head" aria-expanded="${collapsed ? 'false' : 'true'}">
           <span class="plg-ev-caret" aria-hidden="true">▾</span>
           <span class="plg-ev-name">${e.evKey}</span>
           <span class="plg-ev-legs" title="${e.list.length} slips placed on this card">${e.list.length}</span>
-          ${ledgerOutcomeStrip(slipOutcomes)}${recChip}
+          ${ledgerOutcomeStrip(slipOutcomes)}${evMoney}${recChip}
         </button>
         <div class="plg-ev-body"><div class="plg-ev-inner">${cards}</div></div>
       </div>`;
     }).join('');
-    return { html: ledgerShell('parlay', html), count, cashed, settled: settledSlips };
+    // ── GLOW-UP 361 · the money strip ───────────────────────────────────────
+    // Sits ABOVE the events because it answers the question the per-event chips
+    // cannot: across everything, did this make money. Rendered only when there is
+    // settled money to report — an empty strip of zeroes would imply the answer
+    // is "nothing" when the answer is "not measured yet".
+    const m = money;
+    const roi = m.staked > 0 ? ((m.returned - m.staked) / m.staked) * 100 : 0;
+    const net = m.returned - m.staked;
+    const cashRate = settledSlips ? (cashed / settledSlips) * 100 : 0;
+    const bookRows = [...m.byBook.entries()]
+      .sort((a, b) => (b[1].returned - b[1].staked) - (a[1].returned - a[1].staked))
+      .map(([bk, b]) => {
+        const bnet = b.returned - b.staked;
+        const broi = b.staked > 0 ? (bnet / b.staked) * 100 : 0;
+        return `<span class="plm-book" title="${b.slips} settled slip${b.slips === 1 ? '' : 's'} on ${bk} carrying a stake: $${fmtMoney(b.staked)} risked, $${fmtMoney(b.returned)} back.">${bk} <b class="${bnet >= 0 ? 'pos' : 'neg'}">${bnet >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(bnet))}</b> <i>${broi >= 0 ? '+' : '−'}${Math.abs(broi).toFixed(0)}%</i></span>`;
+      }).join('');
+    const caveats = [
+      m.projected ? `${m.projected} of the ${m.slips} settled slips use a PROJECTED return (TO WIN, assuming all-or-nothing) rather than a recorded one — record the actual return on those chips if the book paid a partial.` : '',
+      m.skipped ? `${m.skipped} settled slip${m.skipped === 1 ? '' : 's'} carried a stake but no way to know the return (cashed with no TO WIN and no recorded return), so ${m.skipped === 1 ? 'it is' : 'they are'} excluded entirely rather than counted as a loss.` : '',
+    ].filter(Boolean).join(' ');
+    const moneyStrip = m.slips > 0
+      ? `<div class="plm-strip">
+          <span class="plm-lead" title="Across every settled slip that carries a stake. Cash RATE and MONEY are different questions — a 21% cash rate is a profit at 8x and a rout at 2.7x — so both are shown.">MONEY</span>
+          <span class="plm-cell">${m.slips} settled · $${fmtMoney(m.staked)} risked</span>
+          <span class="plm-cell plm-net ${net >= 0 ? 'pos' : 'neg'}" title="$${fmtMoney(m.returned)} came back on $${fmtMoney(m.staked)} risked.${caveats ? ` ${caveats}` : ''}">${net >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(net))} · ${roi >= 0 ? '+' : '−'}${Math.abs(roi).toFixed(0)}% ROI</span>
+          <span class="plm-cell plm-vs" title="Cash rate counts slips; ROI counts dollars. They diverge when your winners and your big tickets are not the same slips — which is the thing a flat hit rate cannot show you.">vs ${cashRate.toFixed(0)}% cash rate</span>
+          ${bookRows}
+          ${caveats ? `<span class="plm-warn" title="${caveats}">⚠</span>` : ''}
+        </div>`
+      : '';
+    return { html: ledgerShell('parlay', moneyStrip + html), count, cashed, settled: settledSlips, money };
   })();
   const parlayLedgerSummary = parlayLedgerData.count
-    ? `<span style="font-size:10px;color:var(--text-muted)">${parlayLedgerData.count} parlay${parlayLedgerData.count === 1 ? '' : 's'} · ${parlayLedgerData.settled ? `${parlayLedgerData.cashed}/${parlayLedgerData.settled} cashed` : 'none settled yet'}</span>`
+    ? `<span style="font-size:10px;color:var(--text-muted)">${parlayLedgerData.count} parlay${parlayLedgerData.count === 1 ? '' : 's'} · ${parlayLedgerData.settled ? `${parlayLedgerData.cashed}/${parlayLedgerData.settled} cashed` : 'none settled yet'}${parlayLedgerData.money.slips ? ` · ${(() => { const mm = parlayLedgerData.money; const nn = mm.returned - mm.staked; return `<b style="color:${nn >= 0 ? '#6ee7a8' : '#ff8fa3'}">${nn >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(nn))}</b>`; })()}` : ''}</span>`
     : `<span style="font-size:10px;color:var(--text-muted)">no placed parlays yet</span>`;
 
   // ── Per-event breakdown ────────────────────────────────────────────────
@@ -18545,17 +18822,10 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
     btn.disabled = true;
     btn.textContent = '⏳ Repairing...';
     try {
-      const rowCount = async (): Promise<number> => {
-        const raw = await storageGet<Record<string, unknown>>(['prop_archive_v1']);
-        const rows = raw['prop_archive_v1'];
-        return Array.isArray(rows) ? rows.length : 0;
-      };
-      const before = await rowCount();
       const res = await healArchiveFromCache();
-      const after = await rowCount();
       // Row count is reported because this must only ever REWRITE results, never
       // add or drop rows — a change here is the signal something went wrong.
-      showToast(`✓ Repaired from ${res.fighters} cached fighters (${res.skipped} skipped) · rows ${before} → ${after}`);
+      showToast(`✓ ${res.rowsChanged} rows corrected from ${res.fighters} cached fighters · rows ${res.rowsBefore} → ${res.rowsAfter}`);
       void renderArchivePanel(container);
     } catch (err) {
       showToast(`Repair failed: ${(err as Error).message}`);
@@ -18589,6 +18859,39 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
   // always had. Confirms first: a slip is several legs and rebuilding it means
   // reconstructing the whole thing in Parlay Lab, so this is more costly to undo
   // than un-placing one leg.
+  container.querySelectorAll<HTMLElement>('.plp-void').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const evKey = btn.dataset.plpvEv || '';
+      const id = btn.dataset.plpvId || '';
+      const on = btn.dataset.plpvOn === '1';
+      const summary = btn.dataset.plpSum || 'this parlay';
+      if (!evKey || !id) return;
+      if (on) {
+        if (!confirm(`Un-void this slip?
+
+${summary}
+
+It goes back into your cash record, money totals and concentration analysis.`)) return;
+        const ok = await setPlacedParlayVoid(evKey, id, false);
+        showToast(ok ? '✓ Un-voided — back in the record' : 'Could not un-void');
+        if (ok) void renderArchivePanel(container);
+        return;
+      }
+      // Reason is optional and free text; it is the only durable note of WHY a
+      // slip stopped counting, which matters when reading the ledger months on.
+      const reason = prompt(`Mark VOID — the book killed this slip so it never resolved.
+
+${summary}
+
+Optional note (e.g. "Ochoa withdrew"). Leave blank to skip.`, '');
+      if (reason === null) return;
+      const ok = await setPlacedParlayVoid(evKey, id, true, reason.trim() || undefined);
+      showToast(ok ? '⊘ Marked void — kept in the ledger, excluded from the record' : 'Could not void');
+      if (ok) void renderArchivePanel(container);
+    });
+  });
+
   container.querySelectorAll<HTMLElement>('.plp-remove').forEach(btn => {
     btn.addEventListener('click', async (ev) => {
       ev.stopPropagation();
@@ -18598,6 +18901,92 @@ async function renderArchivePanel(container: HTMLElement): Promise<void> {
       if (!confirm(`Remove this placed parlay?\n\n${summary}\n\nIt leaves the Parlay Ledger and stops being graded. Re-place it from Parlay Lab if this was a mistake.`)) return;
       const ok = await removePlacedParlay(evKey, id);
       showToast(ok ? '✕ Parlay removed from ledger' : 'Could not remove that parlay');
+      if (ok) void renderArchivePanel(container);
+    });
+  });
+
+  // GLOW-UP 360 — edit a slip's stake / TO WIN after the fact. The primary entry
+  // point is the Parlay Lab at placement; this exists for slips placed before the
+  // feature, for a mistyped figure, and for the three Noche slips written by hand.
+  // Blank clears the field rather than storing 0 — "not tracked" and "$0" are
+  // different states and only one of them is honest.
+  container.querySelectorAll<HTMLElement>('.plp-money').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const evKey = btn.dataset.plpMoneyEv || '';
+      const id = btn.dataset.plpMoneyId || '';
+      if (!evKey || !id) return;
+      const cur = await getPlacedParlay(evKey, id);
+      if (!cur) { showToast('Could not find that parlay'); return; }
+      const sIn = prompt('Stake — what you risked on this slip. Blank to clear.', cur.stake != null ? String(cur.stake) : '');
+      if (sIn === null) return;
+      // TOTAL RETURN, not profit: $150 at 2.7x reads $405. Stated here because the
+      // other reading is just as natural and would halve every P&L in the ledger.
+      const pIn = prompt('TO WIN — the TOTAL RETURN as the book shows it ($150 at 2.7x = $405, not $255). Blank to clear.', cur.payout != null ? String(cur.payout) : '');
+      if (pIn === null) return;
+      const parseOrNull = (t: string): number | null => {
+        const v = parseFloat(String(t).replace(/[$,\s]/g, ''));
+        return Number.isFinite(v) && v > 0 ? v : null;
+      };
+      const stake = parseOrNull(sIn), payout = parseOrNull(pIn);
+      // Only asked once the slip has settled — there is nothing to record while
+      // it is live, and a third prompt on every edit is noise.
+      // ZERO IS A REAL ANSWER here (an outright loss returns nothing), so this
+      // parser must not treat 0 as blank the way the stake one does.
+      let returned: number | null | undefined;
+      if (btn.dataset.plpSettled === '1') {
+        const proj = stake != null ? (payout != null ? payout : stake) : null;
+        const rIn = prompt('RETURNED — the money the book actually paid back, INCLUDING your stake. 0 if it lost outright, your stake back on a void or push, and whatever the partial paid if it paid one. Blank to fall back to the projection.', cur.returned != null ? String(cur.returned) : (proj != null ? '' : ''));
+        if (rIn === null) return;
+        const t = String(rIn).replace(/[$,\s]/g, '');
+        returned = t === '' ? null : (Number.isFinite(parseFloat(t)) && parseFloat(t) >= 0 ? parseFloat(t) : null);
+      }
+      if (payout != null && stake != null && payout < stake) {
+        if (!confirm(`TO WIN ($${payout}) is less than the stake ($${stake}).
+
+That is a losing price. If you meant the PROFIT rather than the total return, cancel and enter $${fmtMoney(stake + payout)} instead.
+
+Save anyway?`)) return;
+      }
+      const ok = await setPlacedParlayMoney(evKey, id, stake, payout, returned);
+      showToast(ok
+        ? (stake == null ? '✓ Stake cleared'
+          : returned != null ? `✓ $${fmtMoney(stake)} → returned $${fmtMoney(returned)} (${returned - stake >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(returned - stake))})`
+          : `✓ $${fmtMoney(stake)}${payout != null ? ` → $${fmtMoney(payout)}` : ''} saved`)
+        : 'Could not save');
+      if (ok) void renderArchivePanel(container);
+    });
+  });
+
+  // GLOW-UP 360 — per-leg stake, for legs bet STRAIGHT. Legs that ride inside a
+  // parlay stay blank on purpose; the parlay holds that money.
+  container.querySelectorAll<HTMLElement>('.plc-money').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const evKey = btn.dataset.plcmEv || '';
+      const legKey = btn.dataset.plcmKey || '';
+      if (!evKey || !legKey) return;
+      const store = await storageGet<Record<string, any>>([STORAGE_BEST_PICKS_PLACED_KEY]);
+      const cur = store[STORAGE_BEST_PICKS_PLACED_KEY]?.[evKey]?.[legKey];
+      if (!cur) { showToast('Could not find that leg'); return; }
+      const sIn = prompt(`Stake on ${cur.pretty || cur.name} ${cur.dir} ${cur.line} ${cur.statLabel} — straight bets only. Blank if this leg rides inside a parlay.`, cur.stake != null ? String(cur.stake) : '');
+      if (sIn === null) return;
+      const pIn = prompt('TO WIN — the TOTAL RETURN as the book shows it, not the profit. Blank to clear.', cur.payout != null ? String(cur.payout) : '');
+      if (pIn === null) return;
+      const parseOrNull = (t: string): number | null => {
+        const v = parseFloat(String(t).replace(/[$,\s]/g, ''));
+        return Number.isFinite(v) && v > 0 ? v : null;
+      };
+      const stake = parseOrNull(sIn), payout = parseOrNull(pIn);
+      let returned: number | null | undefined;
+      if (btn.dataset.plcmSettled === '1') {
+        const rIn = prompt('RETURNED — money actually paid back, INCLUDING your stake. 0 if it lost. Blank to fall back to the projection.', cur.returned != null ? String(cur.returned) : '');
+        if (rIn === null) return;
+        const t = String(rIn).replace(/[$,\s]/g, '');
+        returned = t === '' ? null : (Number.isFinite(parseFloat(t)) && parseFloat(t) >= 0 ? parseFloat(t) : null);
+      }
+      const ok = await setPlacedLegMoney(evKey, legKey, stake, payout, returned);
+      showToast(ok ? (stake == null ? '✓ Stake cleared' : `✓ $${fmtMoney(stake)}${payout != null ? ` → $${fmtMoney(payout)}` : ''} saved`) : 'Could not save');
       if (ok) void renderArchivePanel(container);
     });
   });
@@ -27323,25 +27712,386 @@ const ctrlMinsOf = (secs: number | null | undefined): number =>
 // It reuses archivePerformanceForRosterFighter rather than reimplementing the
 // scoring, because a second copy of the FP formula is exactly how this codebase
 // produced 2270 phantom findings once before.
-async function healArchiveFromCache(): Promise<{ fighters: number; skipped: number }> {
-  const all = await storageGetAll<Record<string, UFCStatsData | undefined>>();
-  const keys = Object.keys(all).filter((k) => /^ufcstats_v51_/.test(k));
-  let fighters = 0, skipped = 0;
-  debugLog(`[repair] recomputing archived results from ${keys.length} cached fighters…`);
-  for (const k of keys) {
-    const rec = all[k];
-    if (!rec?.name || !Array.isArray(rec.fightHistory) || !rec.fightHistory.length) { skipped++; continue; }
-    try {
-      await archivePerformanceForRosterFighter(rec.name, rec, { bypassRoster: true });
-      fighters++;
-    } catch (e) {
-      skipped++;
-      debugLog(`[repair] ${rec.name}: ${(e as Error).message}`);
+async function healArchiveFromCache(): Promise<{ fighters: number; rowsChanged: number; rowsBefore: number; rowsAfter: number }> {
+  // ── ONE PASS. The obvious implementation — call archivePerformanceForRosterFighter
+  // per cached fighter — is quadratic and unusable: PropArchiveService.updateResult
+  // re-reads and re-scans the WHOLE archive on every call, and the repair makes ~6
+  // calls per fight x ~10 fights x ~370 fighters = ~22,000 scans of 42,880 rows.
+  // The first attempt sat on "REPAIRING…" indefinitely.
+  //
+  // So: read once, index once, correct in memory, write once.
+  //
+  // calcFPForPlatform is CALLED, not reimplemented — a second copy of the FP
+  // formula is how this repo produced 2270 phantom findings before.
+  const all = await storageGetAll<Record<string, any>>();
+  let rowsBefore = 0, rowsAfter = 0, fighters = 0, rowsChanged = 0;
+
+  const nf = (v: unknown): string => (normalizeName(String(v ?? '')) || '').toLowerCase();
+  const ne = (v: unknown): string => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  // mutate() takes the write lock ONCE and does one read + one write. Writing
+  // prop_archive_v1 raw would race the scrape/settle writers — see the comment on
+  // runExclusive in PropArchiveService.
+  await PropArchiveService.mutate(async (archive: any[]) => {
+  rowsBefore = archive.length;
+  rowsAfter = archive.length;
+  if (!rowsBefore) return archive;
+  // Indexed by fighter+propType ONLY, and matched by DATE below rather than by
+  // event text. Event strings are not comparable across sources: the same card
+  // is 'UFC Fight Night: Gilbert Burns vs Mike Malott' on a platform row and
+  // 'UFC Fight Night: Burns vs. Malott' in the UFCStats cache, and normalizeEvent
+  // is a bare lowercase/trim that cannot bridge them. Matching on event text
+  // silently skipped every platform-spelled row — the first version of this pass
+  // reported 1360 corrections while never looking at them.
+  //
+  // A fighter has at most one bout on a date, so fighter+propType+date is
+  // effectively a unique key, and far safer than the fuzzy event matching in
+  // updateResult that caused [[project_archive_wrong_fight_attribution]].
+  const idx = new Map<string, any[]>();
+  for (const r of archive) {
+    if (!r) continue;
+    const k = `${nf(r.fighter)}|${String(normalizePropType(r.propType)).toLowerCase()}`;
+    const bucket = idx.get(k);
+    if (bucket) bucket.push(r); else idx.set(k, [r]);
+  }
+  const DATE_TOL_MS = 2 * 24 * 60 * 60 * 1000;
+
+  for (const key of Object.keys(all)) {
+    if (!/^ufcstats_v51_/.test(key)) continue;
+    const rec = all[key];
+    if (!rec?.name || !Array.isArray(rec.fightHistory) || !rec.fightHistory.length) continue;
+    fighters++;
+    const who = nf(rec.name);
+    for (const f of rec.fightHistory) {
+      if (!f?.event) continue;
+      if (f.sigStr == null && f.totStr == null && f.kd == null && f.td == null && f.ctrlSecs == null) continue;
+      const won = f.result === 'win';
+      const ev = ne(f.event);
+      // CTRL is archived under BOTH 'ctrl' (settled, carries the line) and
+      // 'Control' (backfill) — see [[project_ctrl_archive_dual_proptype]].
+      const targets: Array<[string[], number | null]> = [
+        [['fantasy'],    calcFPForPlatform('pick6', f.sigStr, f.totStr, f.ctrlSecs, f.timeSecs, f.kd, f.td, f.rev, f.sub, won, f.method, f.round)],
+        [['fantasy_pp'], calcFPForPlatform('prizepicks', f.sigStr, f.totStr, f.ctrlSecs, f.timeSecs, f.kd, f.td, f.rev, f.sub, won, f.method, f.round)],
+        [['ss'],         f.sigStr ?? null],
+        [['td'],         f.td ?? null],
+        [['ctrl', 'control'], f.ctrlSecs != null ? ctrlMinsOf(f.ctrlSecs) : null],
+        [['fighttime'],  f.timeSecs != null ? parseFloat((Number(f.timeSecs) / 60).toFixed(2)) : null],
+      ];
+      const fightTs = Date.parse(String(f.date ?? ''));
+      for (const [propTypes, value] of targets) {
+        if (value == null || !Number.isFinite(Number(value))) continue;
+        for (const pt of propTypes) {
+          for (const row of idx.get(`${who}|${pt}`) ?? []) {
+            // Same card by either test: the event strings happen to agree, or the
+            // dates do. Rows with neither are left alone rather than guessed at.
+            const rowTs = Date.parse(String(row.date ?? ''));
+            const sameEvent = ne(row.event) === ev;
+            const sameDate = Number.isFinite(fightTs) && Number.isFinite(rowTs)
+              && Math.abs(rowTs - fightTs) <= DATE_TOL_MS;
+            if (!sameEvent && !sameDate) continue;
+            // Only ever REWRITE an existing result. Rows with no result are the
+            // backfill's job (backfillUnresolvedFromKnownOutcomes); this pass is
+            // for values that are present but WRONG, which that one cannot see.
+            if (!Number.isFinite(Number(row.result))) continue;
+            if (Math.abs(Number(row.result) - Number(value)) <= 0.005) continue;
+            row.result = Number(value);
+            rowsChanged++;
+          }
+        }
+      }
     }
   }
-  debugLog(`[repair] done — ${fighters} fighters recomputed, ${skipped} skipped`);
-  return { fighters, skipped };
+
+    rowsAfter = archive.length;
+    return archive;
+  });
+
+  debugLog(`[repair] ${fighters} cached fighters · ${rowsChanged} rows corrected · ${rowsBefore} rows in, ${rowsAfter} out`);
+  return { fighters, rowsChanged, rowsBefore, rowsAfter };
 }
+
+// ── FIX OPENING LINES (console) ────────────────────────────────────────────
+// Corrects a stored OPENING line that was anchored after the line had already
+// moved. Fetching late stores the POST-move value as the open, so the movement
+// becomes invisible — stored open == current line, and the fighter never shows
+// as a mover. The Discord alert history is the only independent record of what
+// the opener actually was.
+//
+//   window.fixOpeningLines([['jean silva', 43.5], ['tommy mcmillen', 53.5]])
+//   window.fixOpeningLines([...], 'ud', 'ss')      // platform/stat default p6/ss
+//
+// *** ONLY CORRECTS KEYS THAT ALREADY EXIST. *** A baseline that does not exist
+// is not created: inventing one manufactures line movement that never happened,
+// which is worse than having no baseline at all.
+//
+// Goes through _openingLines + persistOpeningLines rather than writing
+// lines_open_v1 raw, for two reasons learned the hard way today: the page holds
+// the baselines in memory and a later snapshot would rewrite storage from that
+// stale Map, and a raw write can race the page's own writer and vanish with no
+// error. persistOpeningLines also preserves eventKey / betrSeedHash /
+// forBetrEventDate / capturedAt, which a hand-built record would drop.
+async function fixOpeningLines(pairs: Array<[string, number]>, platform = 'p6', stat = 'ss'): Promise<void> {
+  if (!Array.isArray(pairs) || !pairs.length) { console.warn('fixOpeningLines: no pairs'); return; }
+  const report: Array<Record<string, unknown>> = [];
+  let changed = 0;
+  for (const [rawName, value] of pairs) {
+    const key = openingLineKey(platform, stat, String(rawName));
+    if (!_openingLines.has(key)) {
+      report.push({ key, action: 'NO SUCH BASELINE — not created, investigate the name' });
+      continue;
+    }
+    const before = _openingLines.get(key);
+    if (Number(before) === Number(value)) {
+      report.push({ key, from: before, to: value, action: 'already correct' });
+      continue;
+    }
+    _openingLines.set(key, Number(value));
+    report.push({ key, from: before, to: Number(value), action: 'corrected' });
+    changed++;
+  }
+  console.table(report);
+  if (!changed) { console.log('[fix-openers] nothing to write.'); return; }
+
+  await persistOpeningLines();
+
+  // Read back: a write reporting success proves nothing.
+  const back = await storageGet<Record<string, any>>(['lines_open_v1']);
+  const lines = back['lines_open_v1']?.lines || {};
+  let wrong = 0;
+  for (const [rawName, value] of pairs) {
+    const key = openingLineKey(platform, stat, String(rawName));
+    if (!(key in lines)) continue;
+    if (Number(lines[key]) !== Number(value)) { wrong++; console.error(`  [fix-openers] ${key} is ${lines[key]}, expected ${value}`); }
+  }
+  if (wrong) console.error(`[fix-openers] WRITE DID NOT PERSIST for ${wrong} key(s).`);
+  else console.log(`[fix-openers] VERIFIED: ${changed} opener(s) corrected and read back. ${Object.keys(lines).length} baselines total.`);
+  console.log('[fix-openers] NOTE: line_history_v1 is untouched. Its earliest point may still');
+  console.log('  hold the post-move value, which only matters if the baselines are ever wiped');
+  console.log('  and reconstructed from history.');
+  try { renderFighters(); } catch { /* board may not be mounted */ }
+}
+(window as unknown as { fixOpeningLines: typeof fixOpeningLines }).fixOpeningLines = fixOpeningLines;
+
+// ── NAME_ALIASES SANITY CHECK (console) ────────────────────────────────────
+// Born from a real bug: 'Damon Jackson' -> 'Donte Johnson' sat in the map since
+// June and MERGED TWO REAL FIGHTERS — a featherweight with 14 UFC fights filed
+// under a 9-0 middleweight. One man's history was erased, the other's polluted,
+// and every lean for either was computed on the mixture. It was only caught
+// because an unrelated sweep happened to surface it.
+//
+//   window.auditAliases()
+//
+// The signature that would have caught it on day one: BOTH names have their own
+// UFCStats cache and their fight DATES DO NOT OVERLAP. One person cannot fight
+// on two cards at once, so two full, disjoint histories means two people.
+//
+// Read-only. Reports, never edits — an alias is a judgement call about identity
+// and [[project_archive_wrong_fight_attribution]] is what automatic "fixes"
+// would risk.
+async function auditAliases(): Promise<void> {
+  const all = await storageGetAll<Record<string, any>>();
+  const nf = (v: unknown): string => (normalizeName(String(v ?? '')) || '').toLowerCase();
+  // RAW normalisation — deliberately NOT normalizeName, which applies the very
+  // aliases under test and would make every entry look self-consistent.
+  const raw = (v: unknown): string => String(v ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^A-Za-z ]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+
+  const caches = new Map<string, any>();
+  for (const [k, v] of Object.entries(all)) {
+    if (/^ufcstats_v51_/.test(k) && v?.name && Array.isArray(v.fightHistory)) caches.set(raw(v.name), v);
+  }
+  const archive: any[] = Array.isArray(all['prop_archive_v1']) ? all['prop_archive_v1'] : [];
+  const archiveCount = new Map<string, number>();
+  for (const r of archive) {
+    if (!r) continue;
+    const k = raw(r.fighter);
+    archiveCount.set(k, (archiveCount.get(k) || 0) + 1);
+  }
+  const dates = (rec: any): Set<string> => new Set((rec?.fightHistory || [])
+    .map((f: any) => String(f?.date ?? '').trim()).filter(Boolean));
+
+  const srcKeys = new Set(Object.keys(NAME_ALIASES).map(raw));
+  const rows: Array<Record<string, unknown>> = [];
+  for (const [src, dst] of Object.entries(NAME_ALIASES)) {
+    const S = raw(src), D = raw(dst);
+    const sc = caches.get(S), dc = caches.get(D);
+    const notes: string[] = [];
+    let severity = 0;
+
+    if (S === D) { notes.push('SELF-MAPPING — does nothing, safe to delete'); severity = Math.max(severity, 1); }
+    if (srcKeys.has(D) && S !== D) { notes.push(`CHAIN — the target is itself an alias source, and normalizeName applies only ONE hop, so this half-resolves`); severity = Math.max(severity, 2); }
+
+    if (sc && dc && S !== D) {
+      const ds = dates(sc), dd = dates(dc);
+      const shared = [...ds].filter(d => dd.has(d));
+      if (ds.size && dd.size && shared.length === 0) {
+        notes.push(`*** LIKELY TWO DIFFERENT FIGHTERS *** both sides have a cache and share NO fight date (${ds.size} vs ${dd.size} fights). One person cannot fight two cards at once. THIS IS THE DAMON JACKSON SIGNATURE — verify against UFCStats before trusting either side.`);
+        severity = 3;
+      } else if (shared.length) {
+        notes.push(`both cached, ${shared.length} shared fight date(s) — consistent with one person`);
+      }
+    } else if (!dc && S !== D) {
+      // A missing cache is NOT evidence of a bad spelling — caches only exist for
+      // fighters recently fetched, so most correct aliases have none. Archive rows
+      // under the target ARE evidence the spelling is real. The first run of this
+      // audit raised 18 warnings on that basis and every one was a false alarm.
+      if ((archiveCount.get(D) || 0) > 0) {
+        notes.push(`target confirmed by ${archiveCount.get(D)} archive row(s); no cache, which just means not recently fetched`);
+      } else {
+        notes.push('TARGET NOT CACHED AND ABSENT FROM THE ARCHIVE — nothing anywhere uses this spelling; likely a typo');
+        severity = Math.max(severity, 2);
+      }
+    }
+
+    const aSrc = archiveCount.get(S) || 0, aDst = archiveCount.get(D) || 0;
+    // An unused source is harmless — it is a spelling a book MIGHT emit. Noted at
+    // the lowest level rather than treated as a problem to fix.
+    if (!sc && !aSrc && S !== D) { notes.push('source unused so far — harmless, it is a spelling a book might still emit'); severity = Math.max(severity, 1); }
+
+    rows.push({
+      severity, alias: `${src}  ->  ${dst}`,
+      'src cached': sc ? `${sc.fightHistory.length}f` : '—',
+      'dst cached': dc ? `${dc.fightHistory.length}f` : '—',
+      'archive src': aSrc, 'archive dst': aDst,
+      notes: notes.join(' | ') || 'ok',
+    });
+  }
+  rows.sort((a, b) => Number(b.severity) - Number(a.severity));
+  console.log('%c[alias-audit] READ-ONLY', 'font-weight:bold;font-size:13px',
+    `${rows.length} aliases`);
+  console.table(rows);
+  const bad = rows.filter(r => Number(r.severity) >= 3).length;
+  const warn = rows.filter(r => Number(r.severity) === 2).length;
+  const tidy = rows.filter(r => Number(r.severity) === 1).length;
+  console.log(`  ${bad} likely-two-fighters · ${warn} needs a look · ${tidy} tidy-up · ${rows.length - bad - warn - tidy} ok`);
+  if (bad) console.log('%c  Verify the flagged ones against UFCStats. Removing an alias does NOT un-merge rows already written under it — see [[project_archive_wrong_fight_attribution]] for the relabel.', 'color:#f85149');
+  console.log('  NOTE: a same-person alias can still look "ok" here if only one side is cached — absence of a flag is not proof.');
+}
+(window as unknown as { auditAliases: typeof auditAliases }).auditAliases = auditAliases;
+
+// ── CLEAR ORPHAN RESULTS (console) ─────────────────────────────────────────
+// Clears `result` on rows for a card the fighter has no fight on record for.
+//
+// THIS EXISTS IN CODE, NOT AS A SNIPPET, BECAUSE THE SNIPPET COULD NOT WIN.
+// A console snippet writes prop_archive_v1 raw. The settle runs on page load and
+// read-modify-writes the same key under PropArchiveService's lock, so a raw
+// write that lands mid-settle is silently overwritten — both writes "succeed",
+// chrome.runtime.lastError is null, and the change just is not there afterwards.
+// That swallowed a relabel and then this clear before a post-write read-back
+// caught it. Going through mutate() takes the lock and cannot be clobbered.
+//
+//   window.clearOrphanResults([['Conor McGregor', '2026-06-14'], ...])
+//
+// Each target is RE-VERIFIED against the live cache first: if the fighter has
+// since gained a fight on that date, the row is SKIPPED. That guard matters —
+// the orphan population started at 249 rows and 238 of them were stale cache
+// that refetching fixed, including a whole card wrongly believed cancelled.
+async function clearOrphanResults(targets: Array<[string, string]>): Promise<void> {
+  if (!Array.isArray(targets) || !targets.length) { console.warn('clearOrphanResults: no targets'); return; }
+  const all = await storageGetAll<Record<string, any>>();
+  const nf = (v: unknown): string => (normalizeName(String(v ?? '')) || '').toLowerCase();
+  const TOL = 2 * 24 * 60 * 60 * 1000;
+  const caches = new Map<string, any>();
+  for (const [k, v] of Object.entries(all)) {
+    if (/^ufcstats_v51_/.test(k) && v?.name && Array.isArray(v.fightHistory)) caches.set(nf(v.name), v);
+  }
+  const want = targets.map(([n, d]) => [nf(n), String(d).slice(0, 10)] as const);
+
+  const report: Array<Record<string, unknown>> = [];
+  let cleared = 0, skipped = 0, before = 0, after = 0;
+  await PropArchiveService.mutate(async (archive: any[]) => {
+    before = archive.length;
+    for (const r of archive) {
+      if (!r || !Number.isFinite(Number(r.result))) continue;
+      const day = String(r.date ?? '').slice(0, 10);
+      if (!want.some(([n, d]) => d === day && n === nf(r.fighter))) continue;
+      const rec = caches.get(nf(r.fighter));
+      const rowTs = Date.parse(String(r.date ?? ''));
+      const has = !!rec && rec.fightHistory.some((f: any) => {
+        const ts = Date.parse(String(f?.date ?? ''));
+        return Number.isFinite(ts) && Number.isFinite(rowTs) && Math.abs(ts - rowTs) <= TOL;
+      });
+      if (has) {
+        skipped++;
+        report.push({ fighter: r.fighter, event: r.event, date: day, propType: r.propType,
+          action: 'SKIPPED — fighter now HAS a fight on this date' });
+        continue;
+      }
+      report.push({ fighter: r.fighter, event: r.event, date: day, propType: r.propType,
+        line: r.line ?? null, 'result cleared': r.result, platform: r.platform || '' });
+      delete r.result;
+      cleared++;
+    }
+    after = archive.length;
+    return archive;
+  });
+
+  console.table(report);
+  console.log(`[clear-orphans] cleared ${cleared} · skipped ${skipped} · rows ${before} -> ${after}`);
+  // Read back regardless: the whole reason this moved into code is that a write
+  // reporting success proved nothing.
+  const check = await storageGet<Record<string, any>>(['prop_archive_v1']);
+  const back: any[] = Array.isArray(check['prop_archive_v1']) ? check['prop_archive_v1'] : [];
+  const stillSet = back.filter((r) => r && Number.isFinite(Number(r.result))
+    && want.some(([n, d]) => d === String(r.date ?? '').slice(0, 10) && n === nf(r.fighter))).length;
+  if (stillSet) console.error(`[clear-orphans] WRITE DID NOT PERSIST — ${stillSet} target row(s) still carry a result.`);
+  else console.log(`[clear-orphans] VERIFIED clean. ${back.length} rows.`);
+}
+(window as unknown as { clearOrphanResults: typeof clearOrphanResults }).clearOrphanResults = clearOrphanResults;
+
+// ── MANUAL REFETCH (console) ───────────────────────────────────────────────
+// ⟳ Repair from Cache can only correct a row it can recompute, and it
+// recomputes from the LOCAL ufcstats cache. A fighter whose cache predates
+// their fight has no fight to recompute from, so the repair silently leaves
+// those rows alone — which is how four legs survived the 2026-09-06 pass with
+// caches stamped 2026-08-07/15, weeks before the cards they were graded on.
+//
+// Nothing refetches them on its own: fetchFromUFCStats is only ever called for
+// fighters on the CURRENT board (the same roster gate behind the settle-heal
+// orphan window), so a past-card fighter is unreachable no matter how stale
+// their cache is. Their TTL expired long ago; nobody asks.
+//
+//   window.refetchFighters(['Jalin Turner', 'Mackenzie Dern'])
+//
+// Then click ⟳ Repair from Cache. SEQUENTIAL on purpose — UFCStats serves a
+// proof-of-work challenge and parallel fetches make it worse, not faster.
+async function refetchFighters(names: string[]): Promise<void> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const raw of names) {
+    // NORMALIZE FIRST. The cache key is built from the name as given, so a raw
+    // archive spelling lands on the wrong key: 'Mansur Abdul-Malik' keeps its
+    // hyphen and looks for ufcstats_v51_mansur_abdul-malik while the record
+    // lives under ..._mansur_abdul_malik. The first run of this helper reported
+    // ok:false / "fights before: 0" for a fighter who plainly had 6 cached
+    // fights, which is the tell.
+    const name = normalizeName(String(raw || '').trim()) || String(raw || '').trim();
+    if (!name) continue;
+    const key = `ufcstats_v51_${name.toLowerCase().replace(/\s+/g, '_')}`;
+    const before = await storageGet<Record<string, any>>([key]);
+    const prevAt = before[key]?.fetchedAt ?? null;
+    const prevN = Array.isArray(before[key]?.fightHistory) ? before[key].fightHistory.length : 0;
+    // Mark stale rather than delete, so a failed fetch leaves the old record as
+    // a fallback instead of a hole (the Jean Silva precedent).
+    if (before[key]) await storageSet({ [key]: { ...before[key], fetchedAt: 0 } });
+    let data: UFCStatsData | null = null;
+    try { data = await fetchFromUFCStats(name); } catch (err) { debugLog(`refetch failed: ${name} — ${(err as Error).message}`); }
+    const after = await storageGet<Record<string, any>>([key]);
+    const nowN = Array.isArray(after[key]?.fightHistory) ? after[key].fightHistory.length : 0;
+    out.push({
+      fighter: name,
+      ok: !!data,
+      'fights before': prevN,
+      'fights after': nowN,
+      gained: nowN - prevN,
+      'cached was': prevAt ? new Date(prevAt).toISOString().slice(0, 16) : null,
+      'cached now': after[key]?.fetchedAt ? new Date(after[key].fetchedAt).toISOString().slice(0, 16) : null,
+      latest: nowN ? after[key].fightHistory[0]?.event : null,
+    });
+  }
+  console.table(out);
+  console.log('Now click ⟳ Repair from Cache. A fighter with gained: 0 did NOT pick up the');
+  console.log('missing fight — check the name spelling against UFCStats before repairing.');
+}
+(window as unknown as { refetchFighters: typeof refetchFighters }).refetchFighters = refetchFighters;
 
 async function archivePerformanceForRosterFighter(
   name: string,

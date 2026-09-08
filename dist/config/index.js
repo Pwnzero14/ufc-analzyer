@@ -215,6 +215,15 @@ export const NAME_ALIASES = {
     'Serghei Spivak': 'Serghei Spivac',
     'Sergey Spivac': 'Serghei Spivac',
     'Sergei Spivac': 'Serghei Spivac',
+    // 2026-09-08 (Noche UFC: Silva vs. Delgado): Pick6 renders him "R. Rongzhu" and
+    // the scrape reads that as a two-token name "Rong Rongzhu"; UFCStats and the
+    // card use the mononym "Rongzhu". Caught by the placed-leg dry run — the
+    // archive holds 60 rows under "Rongzhu" and exactly ONE under "Rong Rongzhu",
+    // that one being this event's Pick6 SS row. Without the alias a leg recorded
+    // under either spelling can fail to meet the row settle writes, which is the
+    // ungradeable-leg shape from [[project_leg_ungradeable_pulled_line]].
+    // Same person beyond doubt: same bout, opponent Rafa Garcia, line 69.5.
+    'Rong Rongzhu': 'Rongzhu',
     'Xiong Jing Nan': 'Xiong Jingnan',
     // Reverse-order variants: platforms sometimes list Chinese fighters in
     // Western order (given-family) while UFCStats uses Chinese order (family-given).
@@ -229,8 +238,10 @@ export const NAME_ALIASES = {
     'Xiaonan Yan': 'Yan Xiaonan',
     // Same card, same shape: UD writes "CE Liu" (normalizes to "Ce Liu"), the card is
     // "Liu Ce". Also fixes his opponent string on Levi Rodrigues Jr's UD record.
+    // The self-mapping 'Liu Ce' -> 'Liu Ce' that used to sit beside this was
+    // removed 2026-09-08: it did nothing, and it made THIS entry look like a chain
+    // (its target was also a source key) in the alias audit.
     'Ce Liu': 'Liu Ce',
-    'Liu Ce': 'Liu Ce',
     // UFC 329: Pick6 lists her Chinese-order "Wang Cong" (family Wang) while
     // UD/PP/Betr use Western-order "Cong Wang" — the mismatch split her into a real
     // card + a ghost and broke opponent/moneyline resolution (Tracy Cortez's dog-FP
@@ -241,10 +252,21 @@ export const NAME_ALIASES = {
     // so namesMatch can't merge them — his UD/PP/Betr lines split off the Pick6
     // card, leaving it "1 of 26 without lines". normalizeName collapses both.
     'Muhammad Said': 'Muhammad Saidov',
-    'Damon Jackson': 'Donte Johnson',
+    // REMOVED 2026-09-07: 'Damon Jackson' -> 'Donte Johnson' merged TWO REAL,
+    // DIFFERENT FIGHTERS. Damon "The Leech" Jackson is a featherweight, 23-9-1
+    // with 14 UFC fights; Donte "Lockjaw" Johnson is a middleweight, 9-0-0
+    // (ufcstats fighter-details/ad5cb64af10fc946). It was swept into 457c356
+    // alongside the genuine Chinese reverse-order aliases with no comment, unlike
+    // every other entry here.
+    // The tell: "Donte Johnson" carried full backfill rows (line: null, Control in
+    // SECONDS) on UFC Fight Night: Sandhagen vs. Font (2023-08-05) and Allen vs.
+    // Curtis 2 (2024-04-06) — cards Damon Jackson fought and Donte Johnson,
+    // who debuted much later, did not.
+    // *** Removing this does NOT un-merge existing archive rows: they were WRITTEN
+    // under the aliased name and still say "Donte Johnson". Those need relabelling
+    // separately. *** See [[project_archive_wrong_fight_attribution]].
     'Myktybek Orolbai': 'Myktybek Orolbai Uulu',
     'Orolbai': 'Myktybek Orolbai Uulu',
-    'Kevin Vallejos': 'Kevin Vallejos',
     'Jose Miguel Delgado': 'Jose Delgado',
     'Jose M Delgado': 'Jose Delgado',
     'Patricio Freire': 'Patricio Pitbull',

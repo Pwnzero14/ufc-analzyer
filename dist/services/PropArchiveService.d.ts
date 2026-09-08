@@ -1,4 +1,6 @@
 import type { PropArchiveRecord, PropType } from '../types/index.js';
+/** Exported so bulk repairs key rows the same way updateResult matches them. */
+export declare function normalizePropType(propType: unknown): PropType;
 export declare class PropArchiveService {
     private static readonly RESULT_MATCH_WINDOW_MS;
     private static chromeGet;
