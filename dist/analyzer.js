@@ -345,7 +345,82 @@ function aggregatePlacedPersonalRecord(placedRaw) {
 // actually entered, persisted per event — the multi-leg analog of
 // best_picks_placed_v1. Resolved in the Data view's Parlay Ledger.
 const STORAGE_PARLAY_PLACED_KEY = 'parlay_placed_v1';
-async function persistPlacedParlay(legs) {
+/**
+ * Set (or clear) a single placed LEG's stake and payout — for straight bets.
+ *
+ * Same null-clears-rather-than-zero rule as the parlay version: a leg that rides
+ * inside a parlay must stay blank, because the parlay already carries that money
+ * and recording it here too would double-count it in the totals.
+ */
+async function setPlacedLegMoney(evKey, legKey, stake, payout) {
+    try {
+        const payload = await storageGet([STORAGE_BEST_PICKS_PLACED_KEY]);
+        const raw = payload[STORAGE_BEST_PICKS_PLACED_KEY];
+        const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw } : {};
+        const legs = all[evKey] ? { ...all[evKey] } : null;
+        if (!legs || !legs[legKey])
+            return false;
+        const next = { ...legs[legKey] };
+        if (stake == null)
+            delete next.stake;
+        else
+            next.stake = stake;
+        if (payout == null)
+            delete next.payout;
+        else
+            next.payout = payout;
+        legs[legKey] = next;
+        all[evKey] = legs;
+        await storageSet({ [STORAGE_BEST_PICKS_PLACED_KEY]: all });
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/** Read one placed parlay by event + id. */
+async function getPlacedParlay(evKey, id) {
+    const payload = await storageGet([STORAGE_PARLAY_PLACED_KEY]);
+    const raw = payload[STORAGE_PARLAY_PLACED_KEY];
+    const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    return (all[evKey] || []).find(p => String(p.id) === String(id)) || null;
+}
+/**
+ * Set (or clear) one slip's stake and payout.
+ *
+ * null CLEARS the field — it does not store 0. "Not tracked" and "$0 risked" are
+ * different claims and the ledger's totals must not confuse them: a slip with no
+ * stake is excluded from staked/P&L entirely, whereas a $0 stake would drag a
+ * realised return toward zero.
+ */
+async function setPlacedParlayMoney(evKey, id, stake, payout) {
+    try {
+        const payload = await storageGet([STORAGE_PARLAY_PLACED_KEY]);
+        const raw = payload[STORAGE_PARLAY_PLACED_KEY];
+        const all = raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw } : {};
+        const list = Array.isArray(all[evKey]) ? [...all[evKey]] : [];
+        const i = list.findIndex(p => String(p.id) === String(id));
+        if (i < 0)
+            return false;
+        const next = { ...list[i] };
+        if (stake == null)
+            delete next.stake;
+        else
+            next.stake = stake;
+        if (payout == null)
+            delete next.payout;
+        else
+            next.payout = payout;
+        list[i] = next;
+        all[evKey] = list;
+        await storageSet({ [STORAGE_PARLAY_PLACED_KEY]: all });
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+async function persistPlacedParlay(legs, stake, payout) {
     try {
         const payload = await storageGet([STORAGE_PARLAY_PLACED_KEY]);
         const raw = payload[STORAGE_PARLAY_PLACED_KEY];
@@ -366,7 +441,12 @@ async function persistPlacedParlay(legs) {
         const sig = sigOf(legs);
         if (list.some(p => sigOf(p.legs || []) === sig))
             return 'dup';
-        list.unshift({ id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, placedAt: Date.now(), legs });
+        const rec = { id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, placedAt: Date.now(), legs };
+        if (Number.isFinite(Number(stake)) && Number(stake) > 0)
+            rec.stake = Number(stake);
+        if (Number.isFinite(Number(payout)) && Number(payout) > 0)
+            rec.payout = Number(payout);
+        list.unshift(rec);
         all[evKey] = list.slice(0, 30);
         const evKeys = Object.keys(all);
         if (evKeys.length > 20) {
@@ -11632,7 +11712,18 @@ async function persistAiLeanSnapshot(fighters) {
         debugLog(`AI lean snapshot save failed: ${e.message}`);
     }
 }
+// GLOW-UP 360 — money formatting, one copy. Trims the .00 on whole amounts so a
+// ledger of round stakes stays readable, keeps cents when they exist.
+function fmtMoney(n) {
+    const v = Math.round(Number(n) * 100) / 100;
+    return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
 const parlaySelectedLegs = new Set(); // "fighter|stat|dir" keys
+// GLOW-UP 360 — stake/payout typed in the Parlay Lab, held here so a re-render
+// (timer, line refresh, leg toggle) does not wipe them mid-entry. Cleared only
+// on a successful save; a duplicate rejection keeps them for the retry.
+let _parlayStake = null;
+let _parlayPayout = null;
 let parlayPoolSort = 'conf';
 let parlayPoolStat = 'all';
 let parlayPoolDir = 'all';
@@ -13187,8 +13278,15 @@ function renderParlayLab(container) {
         : '';
     // GLOW-UP 181: place the whole slip into the Parlay Ledger (Data view).
     // Needs 2+ legs — a parlay by definition.
+    // GLOW-UP 360 — stake + payout entered AT PLACEMENT, which is the only moment
+    // the numbers are in front of you. Backed by module-level state because the
+    // board re-renders on a timer and on every line refresh; a bare input would be
+    // wiped mid-entry and the slip would save with no stake.
+    const stakeInputs = selectedPairs.length >= 2
+        ? `<span class="parlay-stake-wrap"><label class="parlay-stake-lab" title="What you actually risked on this slip. Leave blank to record the slip without money tracking.">$<input type="number" class="parlay-stake-in" data-parlay-stake="1" min="0" step="any" placeholder="stake" value="${_parlayStake ?? ''}" /></label><label class="parlay-stake-lab" title="The slip's TO WIN figure — the TOTAL RETURN if it cashes, exactly as the book shows it ($150 at 2.7x reads $405, not $255). Profit on a cash is payout minus stake.">→<input type="number" class="parlay-stake-in" data-parlay-payout="1" min="0" step="any" placeholder="to win" value="${_parlayPayout ?? ''}" /></label></span>`
+        : '';
     const placeParlayBtn = selectedPairs.length >= 2
-        ? `<button class="parlay-place-slip" data-parlay-place="1" title="Save this slip to your Parlay Ledger (Data view) for this event — records what you actually entered, graded against results after the event">● PLACE PARLAY</button>`
+        ? `${stakeInputs}<button class="parlay-place-slip" data-parlay-place="1" title="Save this slip to your Parlay Ledger (Data view) for this event — records what you actually entered, graded against results after the event. Stake and TO WIN are saved with it when filled.">● PLACE PARLAY</button>`
         : '';
     // Slip intelligence: calibrated per-leg probabilities (same recalibration the
     // board's confidence chips use, clamped 35-85 so one hot leg can't print
@@ -13702,13 +13800,34 @@ function renderParlayLab(container) {
             });
             const original = btn.textContent || '';
             btn.classList.add('placed');
-            void persistPlacedParlay(legs).then((res) => {
+            void persistPlacedParlay(legs, _parlayStake, _parlayPayout).then((res) => {
                 btn.textContent = res === 'placed' ? '✓ PLACED' : res === 'dup' ? '✓ ALREADY PLACED' : '✕ FAILED';
-                if (res === 'placed')
-                    showToast('✓ Parlay saved to your Parlay Ledger (Data view)');
+                if (res === 'placed') {
+                    const money = _parlayStake ? ` · $${_parlayStake}${_parlayPayout ? ` → $${_parlayPayout}` : ''}` : '';
+                    showToast(`✓ Parlay saved to your Parlay Ledger (Data view)${money}`);
+                    // Clear only on a real save, so a duplicate rejection does not silently
+                    // discard numbers the user still needs for the retry.
+                    _parlayStake = null;
+                    _parlayPayout = null;
+                }
                 setTimeout(() => { btn.textContent = original; btn.classList.remove('placed'); }, 1600);
             });
         });
+    });
+    container.querySelectorAll('input[data-parlay-stake], input[data-parlay-payout]').forEach(inp => {
+        const isStake = inp.hasAttribute('data-parlay-stake');
+        inp.addEventListener('input', () => {
+            const v = parseFloat(inp.value);
+            const val = Number.isFinite(v) && v > 0 ? v : null;
+            if (isStake)
+                _parlayStake = val;
+            else
+                _parlayPayout = val;
+        });
+        // Typing in the slip must not be read as a board keystroke (the page binds
+        // single-key shortcuts), and Enter should not submit anything.
+        inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter')
+            e.preventDefault(); });
     });
     container.querySelectorAll('.parlay-suggest-card').forEach(card => {
         card.addEventListener('click', () => {
@@ -16204,6 +16323,7 @@ async function renderArchivePanel(container) {
                         && (now.outcome !== rec.outcome || !Number.isFinite(stored) || Math.abs(now.actual - stored) > 0.05);
                     return {
                         rec,
+                        legKey,
                         outcome: rec.outcome,
                         // STORED wins the display again (361). The archive's value lives on
                         // in drift.freshActual and is named in the tooltip.
@@ -16222,7 +16342,7 @@ async function renderArchivePanel(container) {
                 if (res.outcome !== 'pending')
                     updates.push({ evKey, legKey, outcome: res.outcome, actual: res.actual });
                 // Freshly resolved this render — it cannot be stale, so never marked.
-                return { rec, outcome: res.outcome, actual: res.actual, drift: null };
+                return { rec, legKey, outcome: res.outcome, actual: res.actual, drift: null };
             });
             events.push({ evKey, newest: Math.max(0, ...legEntries.map(([, r]) => Number(r.placedAt) || 0)), legs });
         }
@@ -16451,6 +16571,9 @@ async function renderArchivePanel(container) {
             const concChip = fightsOnCard
                 ? `<span class="plg-ev-conc${maxOnOneFight >= 4 ? ' hot' : ''}" title="${e.legs.length} legs spread across ${fightsOnCard} fight${fightsOnCard === 1 ? '' : 's'}${stackedFights ? `, ${stackedFights} of which carry more than one position` : ', none of them stacked'}. Your deepest single fight holds ${maxOnOneFight} leg${maxOnOneFight === 1 ? '' : 's'} — that is ${Math.round((maxOnOneFight / e.legs.length) * 100)}% of this card riding on one result. Legs are already sorted by fight and share a lit spine, so a stack reads as one block.">${fightsOnCard} FIGHT${fightsOnCard === 1 ? '' : 'S'}${maxOnOneFight > 1 ? ` · MAX ${maxOnOneFight}` : ''}</span>`
                 : '';
+            // GLOW-UP 360 — per-card straight-bet totals. Parlay stakes live in the
+            // parlay ledger; counting them here too would double-count the same money.
+            let evLegStaked = 0, evLegNet = 0;
             const sortedLegs = [...e.legs].sort((a, b) => {
                 const ka = fightKeyOf(a.rec), kb = fightKeyOf(b.rec);
                 if (ka !== kb)
@@ -16554,9 +16677,30 @@ async function renderArchivePanel(container) {
                 // GLOW-UP 359: BOTH corners, so searching either name returns the fight.
                 // Lowercased and stripped to the same alphabet the handler reduces the
                 // query to, so "O'Malley" and "omalley" land on each other.
+                // GLOW-UP 360 — per-leg stake, for STRAIGHT bets only.
+                // Rides INSIDE .plc-name rather than as a new cell: .plg-leg becomes a
+                // grid of 8-10 tracks at the breakpoints below and an extra child
+                // overflows into an implicit row (bug 347). The chip is only rendered
+                // when a stake exists — most legs are parlay riders with no stake of
+                // their own, and a row of empty ＄ affordances would bury the real ones.
+                const lStake = Number.isFinite(Number(r.stake)) ? Number(r.stake) : null;
+                const lPayout = Number.isFinite(Number(r.payout)) ? Number(r.payout) : null;
+                const lPL = (lStake != null && l.outcome !== 'pending')
+                    ? (l.outcome === 'miss' ? -lStake : (lPayout != null ? lPayout - lStake : null))
+                    : null;
+                if (lStake != null) {
+                    evLegStaked += lStake;
+                    if (lPL != null) {
+                        evLegNet += lPL;
+                    }
+                }
+                const escM = (x) => String(x).replace(/"/g, '&quot;');
+                const legMoney = lStake == null
+                    ? `<button class="plc-money empty" data-plcm-ev="${escM(e.evKey)}" data-plcm-key="${escM(l.legKey)}" title="No stake on this leg. Leave it blank if the leg rides inside a parlay — the parlay carries the money. Click to record a stake if you bet this one straight.">＄</button>`
+                    : `<button class="plc-money" data-plcm-ev="${escM(e.evKey)}" data-plcm-key="${escM(l.legKey)}" title="Straight bet: risked $${fmtMoney(lStake)}${lPayout != null ? `, TO WIN $${fmtMoney(lPayout)} total return (profit $${fmtMoney(lPayout - lStake)})` : ' — no TO WIN recorded'}. Click to edit.">$${fmtMoney(lStake)}${lPL != null ? ` <i class="plp-pl ${lPL >= 0 ? 'pos' : 'neg'}">${lPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(lPL))}</i>` : ''}</button>`;
                 const searchKey = ledgerSearchKey(`${r.name} ${r.opponent || ''}`);
                 return `<div class="plg-leg${nFight > 1 ? ' in-group' : ''}${isGroupHead ? ' group-head' : ''}" data-outcome="${l.outcome}" data-name="${searchKey}" style="--plg-i:${Math.min(rowI, 28)}">
-          <span class="plc-name">${r.pretty}</span>
+          <span class="plc-name">${r.pretty}${legMoney}</span>
           <b class="bps-dir ${r.dir === 'OVER' ? 'ov' : 'un'}">${r.dir}</b>
           <span class="bps-line">${r.line ?? '—'}</span>
           <i class="bps-stat st-${r.source}">${r.statLabel}</i>
@@ -16585,6 +16729,9 @@ async function renderArchivePanel(container) {
             const collapsed = _ledgerCollapsedEvents.has(ledgerEvKey('placed', e.evKey));
             const strip = ledgerOutcomeStrip(sortedLegs.map(l => l.outcome === 'hit' ? 'hit' : l.outcome === 'miss' ? 'miss' : 'pending'));
             const pendN = e.legs.length - evSettled;
+            const evLegMoney = evLegStaked > 0
+                ? `<span class="plg-ev-money${evLegNet !== 0 ? (evLegNet >= 0 ? ' pos' : ' neg') : ''}" title="$${fmtMoney(evLegStaked)} staked on STRAIGHT bets on this card — legs you backed on their own. Parlay stakes are counted in the Parlay Ledger instead, so the same money is never counted twice.${evLegNet !== 0 ? ` Settled straight bets are ${evLegNet >= 0 ? 'up' : 'down'} $${fmtMoney(Math.abs(evLegNet))}.` : ''}">$${fmtMoney(evLegStaked)}${evLegNet !== 0 ? ` · ${evLegNet >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(evLegNet))}` : ''}</span>`
+                : '';
             const pendChip = pendN
                 ? `<span class="plg-ev-record pend" title="${pendN} of ${e.legs.length} legs have no settled archive result yet">○ ${pendN}</span>`
                 : '';
@@ -16593,7 +16740,7 @@ async function renderArchivePanel(container) {
           <span class="plg-ev-caret" aria-hidden="true">▾</span>
           <span class="plg-ev-name">${e.evKey}</span>
           <span class="plg-ev-legs" title="${e.legs.length} placed legs on this card">${e.legs.length}</span>
-          ${concChip}${strip}${evSummary}${pendChip}
+          ${concChip}${strip}${evLegMoney}${evSummary}${pendChip}
         </button>
         <div class="plg-ev-body"><div class="plg-ev-inner">${colHead}${rows}</div></div>
       </div>`;
@@ -16670,6 +16817,7 @@ async function renderArchivePanel(container) {
         let count = 0, cashed = 0, settledSlips = 0;
         const html = evs.map(e => {
             const evDk = eventDedupeKey(e.evKey);
+            let evStaked = 0, evNet = 0, evNetSlips = 0;
             // ── GLOW-UP 305/306 · slips are not independent, and the ledger said nothing
             // Two facts live ACROSS slips, so no per-slip renderer could ever surface
             // them, and this ledger only ever rendered one slip at a time:
@@ -16749,6 +16897,27 @@ async function renderArchivePanel(container) {
                     .map(l => `${prettyName(l.fighter)} ${l.dir} ${l.line ?? '—'} ${l.statLabel}`)
                     .join('  +  ');
                 const esc = (x) => String(x).replace(/"/g, '&quot;');
+                // GLOW-UP 360 — stake / TO WIN / realised P&L.
+                // payout is the TOTAL RETURN the book advertises, so a cash is
+                // (payout - stake) and a bust is (-stake). Nothing is shown as profit
+                // until the slip actually settles; a pending slip shows the wager only.
+                const pStake = Number.isFinite(Number(p.stake)) ? Number(p.stake) : null;
+                const pPayout = Number.isFinite(Number(p.payout)) ? Number(p.payout) : null;
+                const pPL = (pStake != null && !anyPending)
+                    ? (anyMiss ? -pStake : (pPayout != null ? pPayout - pStake : null))
+                    : null;
+                if (pStake != null) {
+                    evStaked += pStake;
+                    if (pPL != null) {
+                        evNet += pPL;
+                        evNetSlips++;
+                    }
+                }
+                const plTag = pPL == null ? ''
+                    : ` <i class="plp-pl ${pPL >= 0 ? 'pos' : 'neg'}">${pPL >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(pPL))}</i>`;
+                const moneyChip = `<button class="plp-money${pStake == null ? ' empty' : ''}" data-plp-money-ev="${esc(e.evKey)}" data-plp-money-id="${esc(String(p.id))}" title="${pStake == null
+                    ? 'No stake recorded for this slip — click to add what you risked and the TO WIN total. Leave blank for slips you are not tracking in money.'
+                    : `Risked $${fmtMoney(pStake)}${pPayout != null ? `, TO WIN $${fmtMoney(pPayout)} (the book's TOTAL RETURN, so profit on a cash is $${fmtMoney(pPayout - pStake)})` : ' — no TO WIN recorded, so profit cannot be computed'}. Click to edit.`}">${pStake == null ? '＄ add' : `$${fmtMoney(pStake)}${pPayout != null ? ` → $${fmtMoney(pPayout)}` : ''}`}${plTag}</button>`;
                 const removeBtn = `<button class="plp-remove" data-plp-ev="${esc(e.evKey)}" data-plp-id="${esc(String(p.id))}" data-plp-sum="${esc(legSummary)}" title="Remove this parlay from the ledger — use when the book voided it (a fight falling off the card) or it was placed by mistake. Re-place from Parlay Lab if needed.">✕</button>`;
                 // GLOW-UP 305: the containment badge. Deliberately on BOTH slips — from the
                 // small one you need to know it buys you nothing the big one didn't already
@@ -16764,7 +16933,7 @@ async function renderArchivePanel(container) {
                 // surface every parlay you have exposure to them in, not just slips where
                 // they happen to be the first leg.
                 const slipSearchKey = ledgerSearchKey(p.legs.map(x => `${x.fighter} ${x.opponent || ''}`).join(' '));
-                return `<div class="plp-parlay${inIdx >= 0 ? ' is-inside' : ''}" data-outcome="${anyPending ? 'pending' : anyMiss ? 'miss' : 'hit'}" data-name="${slipSearchKey}" style="--plg-i:${cardI}"><div class="plp-head"><span class="plp-title">${p.legs.length}-LEG</span>${p.legs[0]?.bookLabel ? `<span class="plp-book ${(() => { const k = String(p.legs[0]?.book || '').toLowerCase(); return k === 'pick6' ? 'bk-p6' : k === 'underdog' ? 'bk-ud' : k === 'prizepicks' ? 'bk-pp' : k === 'betr' ? 'bk-betr' : k.startsWith('draftkings') || k === 'dk' ? 'bk-dk' : ''; })()}">${p.legs[0].bookLabel}</span>` : ''}${containTag}${statusChip}${removeBtn}</div><div class="plp-legs">${legRows}</div></div>`;
+                return `<div class="plp-parlay${inIdx >= 0 ? ' is-inside' : ''}" data-outcome="${anyPending ? 'pending' : anyMiss ? 'miss' : 'hit'}" data-name="${slipSearchKey}" style="--plg-i:${cardI}"><div class="plp-head"><span class="plp-title">${p.legs.length}-LEG</span>${p.legs[0]?.bookLabel ? `<span class="plp-book ${(() => { const k = String(p.legs[0]?.book || '').toLowerCase(); return k === 'pick6' ? 'bk-p6' : k === 'underdog' ? 'bk-ud' : k === 'prizepicks' ? 'bk-pp' : k === 'betr' ? 'bk-betr' : k.startsWith('draftkings') || k === 'dk' ? 'bk-dk' : ''; })()}">${p.legs[0].bookLabel}</span>` : ''}${containTag}${statusChip}${moneyChip}${removeBtn}</div><div class="plp-legs">${legRows}</div></div>`;
             }).join('');
             const evCashed = slipOutcomes.filter(o => o === 'hit').length;
             const evSettledSlips = slipOutcomes.filter(o => o !== 'pending').length;
@@ -16772,12 +16941,15 @@ async function renderArchivePanel(container) {
             const recChip = evSettledSlips
                 ? `<span class="plg-ev-record ${evCashed * 3 >= evSettledSlips ? 'good' : 'bad'}" title="${evCashed} of ${evSettledSlips} settled slips cashed on this card">CASHED ${evCashed}/${evSettledSlips}</span>`
                 : `<span class="plg-ev-record">all pending</span>`;
+            const evMoney = evStaked > 0
+                ? `<span class="plg-ev-money${evNetSlips ? (evNet >= 0 ? ' pos' : ' neg') : ''}" title="$${fmtMoney(evStaked)} staked across the slips on this card that carry a stake.${evNetSlips ? ` ${evNetSlips} of them have settled, for a realised ${evNet >= 0 ? 'profit' : 'loss'} of $${fmtMoney(Math.abs(evNet))}. Slips with no TO WIN recorded are counted at stake only when they bust and are skipped when they cash, so this understates a win rather than inventing one.` : ' None have settled yet.'}">$${fmtMoney(evStaked)}${evNetSlips ? ` · ${evNet >= 0 ? '+' : '−'}$${fmtMoney(Math.abs(evNet))}` : ''}</span>`
+                : '';
             return `<div class="plg-event${collapsed ? ' ev-collapsed' : ''}" data-ledger="parlay" data-evkey="${e.evKey.replace(/"/g, '&quot;')}">
         <button type="button" class="plg-ev-head" aria-expanded="${collapsed ? 'false' : 'true'}">
           <span class="plg-ev-caret" aria-hidden="true">▾</span>
           <span class="plg-ev-name">${e.evKey}</span>
           <span class="plg-ev-legs" title="${e.list.length} slips placed on this card">${e.list.length}</span>
-          ${ledgerOutcomeStrip(slipOutcomes)}${recChip}
+          ${ledgerOutcomeStrip(slipOutcomes)}${evMoney}${recChip}
         </button>
         <div class="plg-ev-body"><div class="plg-ev-inner">${cards}</div></div>
       </div>`;
@@ -18218,6 +18390,82 @@ async function renderArchivePanel(container) {
                 return;
             const ok = await removePlacedParlay(evKey, id);
             showToast(ok ? '✕ Parlay removed from ledger' : 'Could not remove that parlay');
+            if (ok)
+                void renderArchivePanel(container);
+        });
+    });
+    // GLOW-UP 360 — edit a slip's stake / TO WIN after the fact. The primary entry
+    // point is the Parlay Lab at placement; this exists for slips placed before the
+    // feature, for a mistyped figure, and for the three Noche slips written by hand.
+    // Blank clears the field rather than storing 0 — "not tracked" and "$0" are
+    // different states and only one of them is honest.
+    container.querySelectorAll('.plp-money').forEach(btn => {
+        btn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            const evKey = btn.dataset.plpMoneyEv || '';
+            const id = btn.dataset.plpMoneyId || '';
+            if (!evKey || !id)
+                return;
+            const cur = await getPlacedParlay(evKey, id);
+            if (!cur) {
+                showToast('Could not find that parlay');
+                return;
+            }
+            const sIn = prompt('Stake — what you risked on this slip. Blank to clear.', cur.stake != null ? String(cur.stake) : '');
+            if (sIn === null)
+                return;
+            // TOTAL RETURN, not profit: $150 at 2.7x reads $405. Stated here because the
+            // other reading is just as natural and would halve every P&L in the ledger.
+            const pIn = prompt('TO WIN — the TOTAL RETURN as the book shows it ($150 at 2.7x = $405, not $255). Blank to clear.', cur.payout != null ? String(cur.payout) : '');
+            if (pIn === null)
+                return;
+            const parseOrNull = (t) => {
+                const v = parseFloat(String(t).replace(/[$,\s]/g, ''));
+                return Number.isFinite(v) && v > 0 ? v : null;
+            };
+            const stake = parseOrNull(sIn), payout = parseOrNull(pIn);
+            if (payout != null && stake != null && payout < stake) {
+                if (!confirm(`TO WIN ($${payout}) is less than the stake ($${stake}).
+
+That is a losing price. If you meant the PROFIT rather than the total return, cancel and enter $${fmtMoney(stake + payout)} instead.
+
+Save anyway?`))
+                    return;
+            }
+            const ok = await setPlacedParlayMoney(evKey, id, stake, payout);
+            showToast(ok ? (stake == null ? '✓ Stake cleared' : `✓ $${fmtMoney(stake)}${payout != null ? ` → $${fmtMoney(payout)}` : ''} saved`) : 'Could not save');
+            if (ok)
+                void renderArchivePanel(container);
+        });
+    });
+    // GLOW-UP 360 — per-leg stake, for legs bet STRAIGHT. Legs that ride inside a
+    // parlay stay blank on purpose; the parlay holds that money.
+    container.querySelectorAll('.plc-money').forEach(btn => {
+        btn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            const evKey = btn.dataset.plcmEv || '';
+            const legKey = btn.dataset.plcmKey || '';
+            if (!evKey || !legKey)
+                return;
+            const store = await storageGet([STORAGE_BEST_PICKS_PLACED_KEY]);
+            const cur = store[STORAGE_BEST_PICKS_PLACED_KEY]?.[evKey]?.[legKey];
+            if (!cur) {
+                showToast('Could not find that leg');
+                return;
+            }
+            const sIn = prompt(`Stake on ${cur.pretty || cur.name} ${cur.dir} ${cur.line} ${cur.statLabel} — straight bets only. Blank if this leg rides inside a parlay.`, cur.stake != null ? String(cur.stake) : '');
+            if (sIn === null)
+                return;
+            const pIn = prompt('TO WIN — the TOTAL RETURN as the book shows it, not the profit. Blank to clear.', cur.payout != null ? String(cur.payout) : '');
+            if (pIn === null)
+                return;
+            const parseOrNull = (t) => {
+                const v = parseFloat(String(t).replace(/[$,\s]/g, ''));
+                return Number.isFinite(v) && v > 0 ? v : null;
+            };
+            const stake = parseOrNull(sIn), payout = parseOrNull(pIn);
+            const ok = await setPlacedLegMoney(evKey, legKey, stake, payout);
+            showToast(ok ? (stake == null ? '✓ Stake cleared' : `✓ $${fmtMoney(stake)}${payout != null ? ` → $${fmtMoney(payout)}` : ''} saved`) : 'Could not save');
             if (ok)
                 void renderArchivePanel(container);
         });

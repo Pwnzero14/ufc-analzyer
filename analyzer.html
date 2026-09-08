@@ -28761,6 +28761,91 @@ body.bp-compact .best-pick-meta > * { flex: 0 0 auto; }
 .side-pick-btn i { font-style: normal; font-size: 8px; }
 /* Destructive, so it stays quiet until hovered — the ledger is for reading, not
    for accidental clicks. Red only on hover, matching the confirm that follows. */
+/* ── GLOW-UP 360 · stake, payout and realised P&L ──────────────────────────────
+   Money is deliberately QUIET until it exists. An unset chip is a bare ＄ at low
+   opacity that only comes forward on hover, because most placed legs ride inside
+   a parlay and carry no stake of their own — a column of loud empty affordances
+   would bury the handful that are real straight bets.
+   Profit and loss use the same green/red the ledger already spends on hit/miss,
+   which is correct here: the axis is direction (up/down), not book or stat. */
+.plp-money, .plc-money {
+  flex: none;
+  padding: 1px 5px;
+  margin-left: 5px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  line-height: 1.35;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text2);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.10);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.plp-money.empty, .plc-money.empty {
+  opacity: 0.28;
+  color: var(--text3);
+  border-color: rgba(255,255,255,0.07);
+  background: transparent;
+  font-weight: 600;
+}
+.plp-parlay:hover .plp-money.empty, .plg-leg:hover .plc-money.empty { opacity: 0.75; }
+.plp-money:hover, .plc-money:hover {
+  opacity: 1;
+  color: var(--text);
+  border-color: rgba(255,255,255,0.24);
+  background: rgba(255,255,255,0.07);
+}
+.plp-pl { font-style: normal; font-weight: 800; margin-left: 3px; }
+.plp-pl.pos { color: #6ee7a8; }
+.plp-pl.neg { color: #ff8fa3; }
+
+/* Event-head money: same shape as .plg-ev-record so the chip row stays even. */
+.plg-ev-money {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text2);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.10);
+  white-space: nowrap;
+}
+.plg-ev-money.pos { color: #6ee7a8; border-color: rgba(38,208,124,0.30); background: rgba(38,208,124,0.05); }
+.plg-ev-money.neg { color: #ff8fa3; border-color: rgba(255,91,120,0.30); background: rgba(255,91,120,0.05); }
+
+/* Parlay Lab entry — two narrow number fields ahead of ● PLACE PARLAY. Sized to
+   the digits they hold rather than stretching, so the place button keeps its
+   position as the slip grows. */
+.parlay-stake-wrap { display: inline-flex; align-items: center; gap: 4px; margin-right: 6px; }
+.parlay-stake-lab {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--text3);
+}
+.parlay-stake-in {
+  width: 54px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.12);
+}
+.parlay-stake-in:focus { outline: none; border-color: rgba(110,231,168,0.45); background: rgba(255,255,255,0.08); }
+/* Chrome renders spinners on number inputs that steal half the width here. */
+.parlay-stake-in::-webkit-outer-spin-button,
+.parlay-stake-in::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
 .plp-remove {
   flex: none;
   padding: 1px 5px;
